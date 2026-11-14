@@ -11,6 +11,7 @@ Run:
     open http://127.0.0.1:5000
 """
 
+import base64
 import io
 import os
 import shutil
@@ -195,6 +196,66 @@ def download_all():
     return send_file(buf, as_attachment=True, download_name="silencecropper.zip", mimetype="application/zip")
 
 
+FAVICON = base64.b64decode(
+    "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"
+    "8gAAAABJRU5ErkJggg=="
+)
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return send_file(io.BytesIO(FAVICON), mimetype="image/x-icon", max_age=86400)
+
+
 @app.get("/")
 def index():
     page = PAGE if ALLOW_LINK else PAGE.replace("</head>", "<style>[data-mode=link]{display:none}</style></head>")
@@ -207,6 +268,7 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Silence Cropper</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
 <script>
 try {
   const th = localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
