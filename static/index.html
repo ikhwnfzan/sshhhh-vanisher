@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Silence Cropper</title>
+<meta name="description" content="Trim the quiet intro and outro off MP3 files in your browser. Nothing is uploaded.">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
+<script>
+try {
+  const th = localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+  document.documentElement.dataset.theme = th;
+} catch (e) { document.documentElement.dataset.theme = 'dark'; }
+</script>
+<style>
+:root{--bg:#121212;--card:#1c1c1c;--line:#2b2b2b;--text:#fff;--muted:#a1a1aa;--pri:#0aa4c4;--pri-d:#0b7f97;--acc:#F46096;--acc-ink:#2a0615;--tabs:#1a1a1a;--tag:#2a2a2a;--tag-t:#ccc;--dropb:transparent;--cut:#ef4444;--glow:rgba(10,164,196,.32);--err:#f87171}
+:root[data-theme=light]{--bg:#f4f6f8;--card:#fff;--line:#dde2e8;--text:#14181c;--muted:#5a6572;--pri:#0891b2;--pri-d:#0e7490;--tabs:#e9edf1;--tag:#eef1f5;--tag-t:#39424c;--dropb:#cdd4dc;--cut:#dc2626;--glow:rgba(8,145,178,.22);--err:#c62828}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,"Segoe UI",system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column}
+a{color:inherit;text-decoration:none}
+header{display:flex;align-items:center;gap:16px;padding:16px 48px;flex-wrap:wrap}
+.logo{font-weight:900;font-size:26px;letter-spacing:-.5px;margin-right:auto}
+.logo b{color:var(--pri)}
+.badge{background:var(--acc);color:var(--acc-ink);font-weight:700;border:0;border-radius:8px;padding:9px 16px;font-size:15px;cursor:pointer}
+.nav{font-weight:700;font-size:17px;cursor:pointer;background:none;border:0;color:var(--text)}
+.seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{background:none;border:0;color:var(--muted);font-weight:700;font-size:14px;padding:8px 11px;cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--acc);color:var(--acc-ink)}
+.ico{background:none;border:1px solid var(--line);color:var(--text);border-radius:8px;width:38px;height:36px;font-size:18px;cursor:pointer}
+main{width:100%;max-width:1030px;margin:0 auto;padding:28px 20px 60px;flex:1}
+.tabs{display:flex;width:max-content;margin:0 auto;padding:6px;background:var(--tabs);border:1px solid var(--line);border-radius:12px;gap:4px}
+.tab{background:none;border:0;color:var(--muted);font-weight:700;font-size:16px;padding:12px 24px;border-radius:8px;cursor:pointer;letter-spacing:.5px}
+.tab[aria-selected=true]{background:var(--pri);color:#fff}
+h1{font-size:clamp(40px,7vw,64px);font-weight:900;letter-spacing:-2px;text-align:center;margin:56px 0 12px}
+.sub{text-align:center;color:var(--muted);font-size:20px;margin:0 0 36px}
+.row{display:flex;gap:16px;align-items:stretch}
+.drop{flex:1;background:#fff;color:#111;border-radius:12px;padding:0 22px;height:67px;display:flex;align-items:center;gap:14px;cursor:pointer;font-size:19px;min-width:0;border:2px solid var(--dropb)}
+[hidden]{display:none!important}
+.drop svg{color:var(--pri);flex:none}
+.drop input{flex:1;border:0;outline:0;background:none;font:inherit;color:#111;min-width:0}
+.drop.over{border-color:var(--pri)}
+.drop span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#555}
+.drop.has span{color:#111}
+.go{background:var(--pri);color:#fff;border:0;border-radius:12px;font-weight:700;font-size:20px;padding:0 36px;cursor:pointer;box-shadow:0 0 28px var(--glow)}
+.go:disabled{opacity:.5;cursor:wait}
+.hint{text-align:center;color:var(--muted);font-size:14px;margin:12px 0 0}
+.opts{display:flex;gap:40px;flex-wrap:wrap;justify-content:center;margin:26px 0 0;color:var(--muted);font-size:16px}
+.opts label{display:flex;align-items:center;gap:12px}
+.opts output{color:var(--text);font-weight:700;min-width:64px}
+input[type=range]{accent-color:var(--pri);width:200px}
+#results{margin-top:44px;display:grid;gap:18px}
+.item{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px}
+.top{display:flex;gap:20px;align-items:center;flex-wrap:wrap}
+.info{flex:1;min-width:220px}
+.info h3{margin:0 0 6px;font-size:24px;overflow-wrap:anywhere}
+.tags{display:flex;gap:8px;flex-wrap:wrap}
+.tag{background:var(--tag);border:1px solid var(--line);border-radius:6px;padding:5px 11px;font-size:15px;color:var(--tag-t)}
+.tag.hl{color:var(--acc);border-color:var(--acc)}
+.dl{background:var(--pri-d);color:#fff;font-weight:700;font-size:17px;border-radius:8px;padding:14px 28px;white-space:nowrap}
+canvas{width:100%;height:90px;margin-top:20px;display:block}
+.err{color:var(--err)}
+.zip{display:block;margin:0 auto;background:none;border:1px solid var(--acc);color:var(--acc);font-weight:700;border-radius:10px;padding:12px 22px;cursor:pointer}
+#faq{margin-top:70px;color:var(--muted);line-height:1.6;max-width:720px;margin-inline:auto}
+#faq h2{color:var(--text);font-size:22px}
+#faq b{color:var(--text)}
+footer{border-top:1px solid var(--line);text-align:center;color:var(--muted);padding:26px;font-size:17px}
+button:focus-visible,.drop:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+@media(max-width:700px){header{padding:14px 18px;gap:10px}.row{flex-direction:column}.go{height:60px}.nav{display:none}}
+</style>
+</head>
+<body>
+<header>
+  <a class="logo" href="/"><b>sshhh</b>Vanisher</a>
+  <select class="badge" id="bitrate" aria-label="Output bitrate">
+    <option value="128k">128kbps MP3</option><option value="192k">192kbps MP3</option>
+    <option value="256k">256kbps MP3</option><option value="320k" selected>320kbps MP3</option>
+  </select>
+  <a class="nav" href="#faq">FAQ</a>
+  <div class="seg" role="group" aria-label="Language">
+    <button type="button" data-lang="en" aria-pressed="true">EN</button>
+    <button type="button" data-lang="id" aria-pressed="false">ID</button>
+  </div>
+  <button type="button" class="ico" id="themeBtn"></button>
+</header>
+
+<main>
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" aria-selected="true" data-mode="file" data-i18n="tabFile"></button>
+    <button class="tab" role="tab" aria-selected="false" data-mode="batch" data-i18n="tabBatch"></button>
+  </div>
+
+  <h1>Silence Cropper</h1>
+  <p class="sub" data-i18n="sub"></p>
+
+  <div class="row">
+    <div class="drop" id="drop" tabindex="0" role="button">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 20h16"/></svg>
+      <span id="dropText"></span>
+    </div>
+    <button class="go" id="go"></button>
+  </div>
+  <input type="file" id="file" accept=".mp3,audio/mpeg" hidden>
+  <p class="hint" data-i18n="limits"></p>
+
+  <div class="opts">
+    <label><span data-i18n="cut"></span> <input type="range" id="thr" min="-60" max="-5" value="-40"><output id="thrOut">-40 dB</output></label>
+    <label><span data-i18n="pad"></span> <input type="range" id="pad" min="0" max="500" step="10" value="0"><output id="padOut">0 ms</output></label>
+  </div>
+
+  <div id="results" aria-live="polite"></div>
+
+  <section id="faq">
+    <h2>FAQ</h2>
+    <p><b data-i18n="q1"></b><br><span data-i18n="a1"></span></p>
+    <p><b data-i18n="q2"></b><br><span data-i18n="a2"></span></p>
+    <p><b data-i18n="q3"></b><br><span data-i18n="a3"></span></p>
+  </section>
+</main>
+
+<footer>All rights reserved &copy; 2026 ikhwnfzan.</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = ms => { const s = Math.round(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+
+const MAX_MB = 25, MAX_MIN = 10;  // limits per file: change these two numbers to adjust
+
+const T = {
+  en: {
+    tabFile: 'FILE', tabBatch: 'BATCH',
+    sub: 'Cut the quiet intro and outro off your MP3s. Nothing leaves your computer.',
+    limits: `Max ${MAX_MB} MB and ${MAX_MIN} minutes per file`,
+    tooBig: mb => `File is ${mb} MB. The limit is ${MAX_MB} MB.`,
+    tooLong: m => `Song is ${m} min long. The limit is ${MAX_MIN} min.`,
+    dropOne: 'Choose or drop an MP3 file', dropMany: 'Choose or drop MP3 files',
+    nFiles: n => n + ' files selected', pickFirst: 'Pick an MP3 first',
+    trim: 'Trim', trimming: 'Trimming…',
+    cut: 'Cut below', pad: 'Keep padding',
+    tagsKept: 'Tags kept', removed: s => s + 's removed', intro: 'Intro', outro: 'Outro',
+    dl: '⬇ Download MP3', zip: 'Download all as ZIP',
+    errFile: 'Could not trim this file:', errReq: 'Request failed. Is the server running?',
+    toLight: 'Switch to light theme', toDark: 'Switch to dark theme',
+    q1: 'What does -40 dB mean?', a1: 'Any part at the start or end that is quieter than the cut level (default -40 dBFS) is removed. Move the slider lower, for example -50 dB, to cut less.',
+    q2: 'Is the middle of the song changed?', a2: 'No. Only the intro and outro are removed. The file is re-encoded as MP3, so pick a high bitrate.',
+    q3: 'Are tags and cover art kept?', a3: 'Yes. Title, artist, album, cover art and other ID3 tags are copied from the original to the trimmed file.'
+  },
+  id: {
+    tabFile: 'FILE', tabBatch: 'MASSAL',
+    sub: 'Potong intro dan outro yang sunyi dari MP3 kamu. Tidak ada yang keluar dari komputermu.',
+    limits: `Maks ${MAX_MB} MB dan ${MAX_MIN} menit per file`,
+    tooBig: mb => `Ukuran file ${mb} MB. Batasnya ${MAX_MB} MB.`,
+    tooLong: m => `Lagu berdurasi ${m} menit. Batasnya ${MAX_MIN} menit.`,
+    dropOne: 'Pilih atau seret file MP3', dropMany: 'Pilih atau seret file MP3',
+    nFiles: n => n + ' file dipilih', pickFirst: 'Pilih MP3 dulu',
+    trim: 'Potong', trimming: 'Memotong…',
+    cut: 'Potong di bawah', pad: 'Sisakan jeda',
+    tagsKept: 'Tag dipertahankan', removed: s => s + ' dtk dipotong', intro: 'Intro', outro: 'Outro',
+    dl: '⬇ Unduh MP3', zip: 'Unduh semua (ZIP)',
+    errFile: 'Gagal memotong file ini:', errReq: 'Permintaan gagal. Apakah server berjalan?',
+    toLight: 'Ganti ke tema terang', toDark: 'Ganti ke tema gelap',
+    q1: 'Apa arti -40 dB?', a1: 'Bagian awal atau akhir yang lebih pelan dari batas potong (bawaan -40 dBFS) akan dihapus. Geser slider lebih rendah, misalnya -50 dB, agar lebih sedikit yang dipotong.',
+    q2: 'Apakah bagian tengah lagu berubah?', a2: 'Tidak. Hanya intro dan outro yang dihapus. File di-encode ulang sebagai MP3, jadi pilih bitrate yang tinggi.',
+    q3: 'Apakah tag dan sampul tetap ada?', a3: 'Ya. Judul, artis, album, sampul, dan tag ID3 lainnya disalin dari file asli ke file hasil potong.'
+  }
+};
+const store = {
+  get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+let lang = store.get('lang') || ((navigator.language || '').toLowerCase().startsWith('id') ? 'id' : 'en');
+const t = (k, ...a) => { const v = T[lang][k]; return typeof v === 'function' ? v(...a) : v; };
+
+let files = [], mode = 'file', busy = false, last = [], failed = false;
+const input = $('#file'), drop = $('#drop');
+
+function refreshDrop() {
+  $('#dropText').textContent = pickHint ? t('pickFirst') : !files.length ? t(mode === 'file' ? 'dropOne' : 'dropMany')
+    : files.length === 1 ? files[0].name : t('nFiles', files.length);
+}
+let pickHint = false;
+function setBtn() { $('#go').textContent = t(busy ? 'trimming' : 'trim'); }
+
+function draw(canvas, d) {
+  const css = getComputedStyle(document.documentElement);
+  const keep = css.getPropertyValue('--pri').trim(), cutc = css.getPropertyValue('--cut').trim();
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const c = canvas.getContext('2d'); c.scale(dpr, dpr);
+  const n = d.peaks.length, bw = w / n;
+  d.peaks.forEach((p, i) => {
+    const tm = (i + .5) / n * d.duration, kept = tm >= d.start && tm <= d.end;
+    const bh = Math.max(2, p * h);
+    c.fillStyle = kept ? keep : cutc;
+    c.fillRect(i * bw + 1, (h - bh) / 2, Math.max(1, bw - 2), bh);
+  });
+}
+
+function render() {
+  const out = $('#results'); out.innerHTML = '';
+  if (failed) { out.innerHTML = `<div class="item"><p class="err">${esc(t('errReq'))}</p></div>`; return; }
+  const ok = [];
+  last.forEach(d => {
+    const el = document.createElement('div'); el.className = 'item';
+    if (d.error) {
+      el.innerHTML = `<h3>${esc(d.name)}</h3><p class="err">${esc(t('errFile'))} ${esc(d.error)}</p>`;
+    } else {
+      ok.push(d);
+      const removed = d.duration - (d.end - d.start);
+      el.innerHTML = `<div class="top"><div class="info"><h3>${esc(d.name)}</h3><div class="tags">
+        <span class="tag">${fmt(d.duration)} → ${fmt(d.end - d.start)}</span>
+        <span class="tag hl">${esc(t('removed', (removed / 1000).toFixed(1)))}</span>
+        <span class="tag">${esc(t('intro'))} ${(d.start / 1000).toFixed(1)}s</span>
+        <span class="tag">${esc(t('outro'))} ${((d.duration - d.end) / 1000).toFixed(1)}s</span>
+        <span class="tag">${d.threshold} dB</span>${d.tags ? `<span class="tag">${esc(t('tagsKept'))}</span>` : ''}</div></div>
+        <a class="dl" href="${d.url}" download="${esc(d.filename)}">${esc(t('dl'))}</a></div><canvas></canvas>`;
+    }
+    out.appendChild(el);
+    const cv = el.querySelector('canvas'); if (cv) draw(cv, d);
+  });
+  if (ok.length > 1) {
+    const z = document.createElement('button'); z.className = 'zip'; z.textContent = t('zip');
+    z.onclick = async () => {
+      const a = document.createElement('a'); a.href = URL.createObjectURL(await makeZip(ok));
+      a.download = 'SilenceCropper.zip'; a.click();
+    };
+    out.appendChild(z);
+  }
+}
+
+function applyTheme(th) {
+  document.documentElement.dataset.theme = th; store.set('theme', th);
+  const b = $('#themeBtn');
+  b.textContent = th === 'dark' ? '☀' : '☾';
+  b.setAttribute('aria-label', t(th === 'dark' ? 'toLight' : 'toDark')); b.title = b.getAttribute('aria-label');
+  render();
+}
+function applyLang(l) {
+  lang = l; store.set('lang', l);
+  document.documentElement.lang = l;
+  document.querySelectorAll('[data-i18n]').forEach(e => e.textContent = t(e.dataset.i18n));
+  document.querySelectorAll('[data-i18n-ph]').forEach(e => e.placeholder = t(e.dataset.i18nPh));
+  document.querySelectorAll('[data-lang]').forEach(b => b.setAttribute('aria-pressed', b.dataset.lang === l));
+  refreshDrop(); setBtn(); applyTheme(document.documentElement.dataset.theme);
+}
+document.querySelectorAll('[data-lang]').forEach(b => b.onclick = () => applyLang(b.dataset.lang));
+$('#themeBtn').onclick = () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+
+document.querySelectorAll('.tab').forEach(tb => tb.onclick = () => {
+  mode = tb.dataset.mode;
+  document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x === tb));
+  input.multiple = mode === 'batch';
+  setFiles([]);
+});
+function setFiles(list) {
+  files = [...list].filter(f => /\.mp3$/i.test(f.name));
+  if (mode === 'file') files = files.slice(0, 1);
+  pickHint = false;
+  drop.classList.toggle('has', files.length > 0);
+  refreshDrop();
+}
+drop.onclick = () => input.click();
+drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } };
+input.onchange = () => setFiles(input.files);
+['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => setFiles(e.dataTransfer.files));
+
+$('#thr').oninput = e => $('#thrOut').textContent = e.target.value + ' dB';
+$('#pad').oninput = e => $('#padOut').textContent = e.target.value + ' ms';
+
+// ---------- audio engine: everything below runs in the browser ----------
+const u32 = (b, i) => ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0;
+const synch = (b, i) => (b[i] << 21) | (b[i + 1] << 14) | (b[i + 2] << 7) | b[i + 3];
+
+function id3End(b) {  // byte length of the ID3v2 tag at the start of the file (0 if none)
+  return b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33 ? 10 + synch(b, 6) : 0;
+}
+function cleanTag(b) {  // original ID3v2 tag (title, artist, cover art...) minus the stale TLEN length frame
+  const end = id3End(b); if (!end) return null;
+  const ver = b[3];
+  if (ver < 3 || (b[5] & 0xC0)) return b.slice(0, end);  // v2.2 / unsynchronised / extended header: copy as is
+  const frames = []; let i = 10;
+  while (i + 10 <= end && b[i] !== 0) {
+    const id = String.fromCharCode(b[i], b[i + 1], b[i + 2], b[i + 3]);
+    const size = ver === 4 ? synch(b, i + 4) : u32(b, i + 4);
+    if (i + 10 + size > end) break;
+    if (id !== 'TLEN') frames.push(b.slice(i, i + 10 + size));
+    i += 10 + size;
+  }
+  if (!frames.length) return null;
+  const len = frames.reduce((n, f) => n + f.length, 0), out = new Uint8Array(10 + len);
+  out.set(b.slice(0, 5)); out.set([(len >> 21) & 127, (len >> 14) & 127, (len >> 7) & 127, len & 127], 6);
+  let p = 10; frames.forEach(f => { out.set(f, p); p += f.length; });
+  return out;
+}
+function mp3Info(b, from) {  // sample rate and estimated length (seconds) from the first MP3 frame
+  for (let i = from; i < Math.min(b.length - 4, from + 65536); i++) {
+    if (b[i] === 0xFF && (b[i + 1] & 0xE0) === 0xE0) {
+      const v = (b[i + 1] >> 3) & 3, idx = (b[i + 2] >> 2) & 3, br = b[i + 2] >> 4;
+      if (v === 1 || idx === 3 || br === 0 || br === 15 || ((b[i + 1] >> 1) & 3) !== 1) continue;
+      const m1 = v === 3, rate = [44100, 48000, 32000][idx] / (m1 ? 1 : v === 2 ? 2 : 4);
+      const kbps = (m1 ? [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
+                       : [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160])[br];
+      const mono = (b[i + 3] >> 6) === 3, x = i + 4 + (m1 ? (mono ? 17 : 32) : (mono ? 9 : 17));
+      let sec = (b.length - i) * 8 / (kbps * 1000);  // constant-bitrate estimate
+      const tag = String.fromCharCode(b[x], b[x + 1], b[x + 2], b[x + 3]);
+      if ((tag === 'Xing' || tag === 'Info') && (b[x + 7] & 1)) sec = u32(b, x + 8) * (m1 ? 1152 : 576) / rate;
+      return { rate, sec };
+    }
+  }
+  return { rate: 44100, sec: 0 };
+}
+function findCuts(ab, thr, padMs) {  // keep from first to last 10 ms window that is louder than thr (dBFS)
+  const sr = ab.sampleRate, win = Math.max(1, Math.round(sr * 0.01)), n = ab.length;
+  const ch = Array.from({ length: ab.numberOfChannels }, (_, i) => ab.getChannelData(i));
+  const db = s => {
+    const e = Math.min(n, s + win); let sum = 0;
+    for (const c of ch) for (let k = s; k < e; k++) sum += c[k] * c[k];
+    return 10 * Math.log10(sum / ((e - s) * ch.length) + 1e-12);
+  };
+  let s = 0; while (s < n && db(s) < thr) s += win;
+  let e = n; while (e > s && db(Math.max(0, e - win)) < thr) e -= win;
+  if (s >= e) return [0, n];  // the whole file is quieter than the threshold
+  const p = Math.round(sr * padMs / 1000);
+  return [Math.max(0, s - p), Math.min(n, e + p)];
+}
+function peaksOf(ab, bins = 160) {
+  const c = ab.getChannelData(0), step = Math.max(1, Math.floor(ab.length / bins)), out = [];
+  for (let i = 0; i < bins; i++) {
+    let m = 0; const e = Math.min(ab.length, (i + 1) * step);
+    for (let k = i * step; k < e; k++) { const v = Math.abs(c[k]); if (v > m) m = v; }
+    out.push(m);
+  }
+  return out;
+}
+async function encodeMp3(ab, s, e, kbps) {
+  if (!window.lamejs) throw new Error('MP3 encoder failed to load. Check your internet connection.');
+  const nch = Math.min(2, ab.numberOfChannels), enc = new lamejs.Mp3Encoder(nch, ab.sampleRate, kbps);
+  const L = ab.getChannelData(0), R = nch === 2 ? ab.getChannelData(1) : null;
+  const i16 = (f, a, b) => {
+    const o = new Int16Array(b - a);
+    for (let i = a; i < b; i++) { const v = Math.max(-1, Math.min(1, f[i])); o[i - a] = v < 0 ? v * 32768 : v * 32767; }
+    return o;
+  };
+  const parts = [], step = 1152 * 20;
+  for (let i = s, k = 0; i < e; i += step, k++) {
+    const j = Math.min(e, i + step);
+    const buf = R ? enc.encodeBuffer(i16(L, i, j), i16(R, i, j)) : enc.encodeBuffer(i16(L, i, j));
+    if (buf.length) parts.push(buf);
+    if (k % 20 === 0) await new Promise(r => setTimeout(r));  // let the page repaint
+  }
+  const tail = enc.flush(); if (tail.length) parts.push(tail);
+  return parts;
+}
+async function processFile(file, thr, pad, kbps) {
+  if (file.size > MAX_MB * 1024 * 1024) throw new Error(t('tooBig', (file.size / 1048576).toFixed(1)));
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const info = mp3Info(bytes, id3End(bytes)), tag = cleanTag(bytes), rate = info.rate;
+  if (info.sec > MAX_MIN * 60 * 1.1) throw new Error(t('tooLong', (info.sec / 60).toFixed(1)));  // checked before decoding to save memory
+  const Ctx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const ab = await new Ctx(1, 1, rate).decodeAudioData(bytes.buffer.slice(0));
+  if (ab.duration > MAX_MIN * 60) throw new Error(t('tooLong', (ab.duration / 60).toFixed(1)));
+  const [s, e] = findCuts(ab, thr, pad), parts = await encodeMp3(ab, s, e, kbps);
+  const blob = new Blob(tag ? [tag, ...parts] : parts, { type: 'audio/mpeg' }), sr = ab.sampleRate;
+  return { name: file.name, duration: ab.duration * 1000, start: s / sr * 1000, end: e / sr * 1000,
+    peaks: peaksOf(ab), threshold: thr, tags: !!tag, blob, url: URL.createObjectURL(blob),
+    filename: file.name.replace(/\.mp3$/i, '') + '_trimmed.mp3' };
+}
+
+// ---------- minimal ZIP writer (stored, no compression) for batch download ----------
+const crcT = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = b => { let c = -1; for (let i = 0; i < b.length; i++) c = crcT[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ -1) >>> 0; };
+async function makeZip(items) {
+  const enc = new TextEncoder(), chunks = [], central = []; let off = 0;
+  for (const it of items) {
+    const data = new Uint8Array(await it.blob.arrayBuffer()), name = enc.encode(it.filename), crc = crc32(data);
+    const h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true);
+    h.setUint32(14, crc, true); h.setUint32(18, data.length, true); h.setUint32(22, data.length, true); h.setUint16(26, name.length, true);
+    const c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true);
+    c.setUint32(16, crc, true); c.setUint32(20, data.length, true); c.setUint32(24, data.length, true); c.setUint16(28, name.length, true); c.setUint32(42, off, true);
+    chunks.push(h, name, data); central.push(c, name); off += 30 + name.length + data.length;
+  }
+  const e = new DataView(new ArrayBuffer(22)), size = central.reduce((n, x) => n + x.byteLength, 0);
+  e.setUint32(0, 0x06054b50, true); e.setUint16(8, items.length, true); e.setUint16(10, items.length, true);
+  e.setUint32(12, size, true); e.setUint32(16, off, true);
+  return new Blob([...chunks, ...central, e], { type: 'application/zip' });
+}
+
+$('#go').onclick = async () => {
+  if (!files.length) { pickHint = true; refreshDrop(); return; }
+  busy = true; failed = false; last.forEach(d => d.url && URL.revokeObjectURL(d.url)); last = [];
+  setBtn(); $('#go').disabled = true; render();
+  const thr = +$('#thr').value, pad = +$('#pad').value, kbps = parseInt($('#bitrate').value, 10);
+  for (const f of files) {
+    try { last.push(await processFile(f, thr, pad, kbps)); }
+    catch (e) { last.push({ name: f.name, error: String((e && e.message) || e).slice(0, 200) }); }
+    render();
+  }
+  busy = false; $('#go').disabled = false; setBtn(); render();
+};
+
+applyLang(lang);
+</script>
+</body>
+</html>

@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""
-silence cropper - trim the quiet intro and outro off MP3 files.
-
-Setup:
-    pip install flask pydub mutagen
-    install ffmpeg and yt-dlp and make sure both are on your PATH
-
-Run:
-    python cropmin40db.py
-    open http://127.0.0.1:5000
-"""
-
 import base64
 import io
 import os
@@ -251,7 +238,7 @@ FAVICON = base64.b64decode(
 )
 
 
-@app.get("/favicon.ico")
+@app.get("/static/favicon.ico")
 def favicon():
     return send_file(io.BytesIO(FAVICON), mimetype="image/x-icon", max_age=86400)
 
@@ -268,7 +255,7 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Silence Cropper</title>
-<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/static/favicon.ico" sizes="any">
 <script>
 try {
   const th = localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
@@ -282,9 +269,17 @@ try {
 body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,"Segoe UI",system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column}
 a{color:inherit;text-decoration:none}
 header{display:flex;align-items:center;gap:16px;padding:16px 48px;flex-wrap:wrap}
-.logo{font-weight:900;font-size:26px;letter-spacing:-.5px;margin-right:auto}
+.logo{display:flex;align-items:center;gap:7px;font-weight:900;font-size:26px;letter-spacing:-.5px;margin-right:auto}
+.logo svg{width:24px;height:24px;color:var(--pri);flex:none}
 .logo b{color:var(--pri)}
 .badge{background:var(--acc);color:var(--acc-ink);font-weight:700;border:0;border-radius:8px;padding:9px 16px;font-size:15px;cursor:pointer}
+.bitrate-wrap{position:relative}
+#bitrate{display:flex;align-items:center;gap:10px}
+#bitrate svg{width:12px;height:12px;transition:transform .15s ease}
+#bitrate[aria-expanded=true] svg{transform:rotate(180deg)}
+.bitrate-menu{position:absolute;z-index:5;top:calc(100% + 6px);right:0;min-width:100%;padding:5px;background:var(--card);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 20px #0003}
+.bitrate-menu button{display:block;width:100%;padding:9px 12px;text-align:left;white-space:nowrap;background:none;border:0;border-radius:5px;color:var(--text);font:inherit;cursor:pointer}
+.bitrate-menu button:hover,.bitrate-menu button[aria-selected=true]{background:var(--tag)}
 .nav{font-weight:700;font-size:17px;cursor:pointer;background:none;border:0;color:var(--text)}
 .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
 .seg button{background:none;border:0;color:var(--muted);font-weight:700;font-size:14px;padding:8px 11px;cursor:pointer}
@@ -333,11 +328,18 @@ button:focus-visible,.drop:focus-visible,a:focus-visible{outline:2px solid var(-
 </head>
 <body>
 <header>
-  <a class="logo" href="/"><b>sshhh</b>Vanisher</a>
-  <select class="badge" id="bitrate" aria-label="Output bitrate">
-    <option value="128k">128kbps MP3</option><option value="192k">192kbps MP3</option>
-    <option value="256k">256kbps MP3</option><option value="320k" selected>320kbps MP3</option>
-  </select>
+  <a class="logo" href="/"><img src="/static/favicon.ico" width="28" height="28"><span><b>sshhh</b>Vanisher</span></a>
+  <div class="bitrate-wrap">
+    <button type="button" class="badge" id="bitrate" value="320k" aria-label="Output bitrate" aria-haspopup="listbox" aria-expanded="false">
+      <span id="bitrateLabel">320kbps MP3</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m2 4 4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div class="bitrate-menu" id="bitrateMenu" role="listbox" aria-label="Output bitrate" hidden>
+      <button type="button" role="option" data-value="128k">128kbps MP3</button>
+      <button type="button" role="option" data-value="192k">192kbps MP3</button>
+      <button type="button" role="option" data-value="256k">256kbps MP3</button>
+      <button type="button" role="option" data-value="320k" aria-selected="true">320kbps MP3</button>
+    </div>
+  </div>
   <a class="nav" href="#faq">FAQ</a>
   <div class="seg" role="group" aria-label="Language">
     <button type="button" data-lang="en" aria-pressed="true">EN</button>
@@ -350,7 +352,6 @@ button:focus-visible,.drop:focus-visible,a:focus-visible{outline:2px solid var(-
   <div class="tabs" role="tablist">
     <button class="tab" role="tab" aria-selected="true" data-mode="file" data-i18n="tabFile"></button>
     <button class="tab" role="tab" aria-selected="false" data-mode="batch" data-i18n="tabBatch"></button>
-    <button class="tab" role="tab" aria-selected="false" data-mode="link" data-i18n="tabLink"></button>
   </div>
 
   <h1>Silence Cropper</h1>
@@ -532,7 +533,7 @@ function render() {
 function applyTheme(th) {
   document.documentElement.dataset.theme = th; store.set('theme', th);
   const b = $('#themeBtn');
-  b.textContent = th === 'dark' ? '☀' : '☾';
+  b.textContent = th === 'light' ? '☀' : '☾';
   b.setAttribute('aria-label', t(th === 'dark' ? 'toLight' : 'toDark')); b.title = b.getAttribute('aria-label');
   render();
 }
@@ -546,6 +547,23 @@ function applyLang(l) {
 }
 document.querySelectorAll('[data-lang]').forEach(b => b.onclick = () => applyLang(b.dataset.lang));
 $('#themeBtn').onclick = () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+
+const bitrateBtn = $('#bitrate'), bitrateMenu = $('#bitrateMenu');
+function showBitrates(open) {
+  bitrateBtn.setAttribute('aria-expanded', open);
+  bitrateMenu.hidden = !open;
+}
+bitrateBtn.onclick = () => showBitrates(bitrateMenu.hidden);
+bitrateMenu.onclick = e => {
+  const option = e.target.closest('[data-value]');
+  if (!option) return;
+  bitrateBtn.value = option.dataset.value;
+  $('#bitrateLabel').textContent = option.textContent;
+  bitrateMenu.querySelectorAll('[role=option]').forEach(x => x.setAttribute('aria-selected', x === option));
+  showBitrates(false);
+};
+document.addEventListener('click', e => { if (!e.target.closest('.bitrate-wrap')) showBitrates(false); });
+bitrateBtn.onkeydown = e => { if (e.key === 'Escape') showBitrates(false); };
 
 document.querySelectorAll('.tab').forEach(tb => tb.onclick = () => {
   mode = tb.dataset.mode;
