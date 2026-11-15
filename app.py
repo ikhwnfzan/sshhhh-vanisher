@@ -1,4 +1,3 @@
-import base64
 import io
 import os
 import tempfile
@@ -909,7 +908,6 @@ try {
 
 <main>
   <section class="hero">
-    <!-- Pill Tab Switcher with Music Note & Folder Icons + accent-surface gradient -->
     <div class="tabs" role="tablist">
       <button class="tab" role="tab" aria-selected="true" data-mode="file">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
@@ -927,7 +925,6 @@ try {
     <div class="workbench">
       <input type="file" id="file" accept=".mp3,audio/mpeg" hidden>
 
-      <!-- Tall Recessed Clay Dropzone Well -->
       <div class="dropzone" id="drop" tabindex="0" role="button">
         <div class="drop-icon-mold">
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -938,16 +935,13 @@ try {
         <p id="dropSub"></p>
       </div>
 
-      <!-- Cut Below & Keep Padding Sliders -->
       <div class="opts">
         <label><span data-i18n="cut"></span> <input type="range" id="thr" min="-60" max="-5" value="-40"><output id="thrOut">-40 dB</output></label>
         <label><span data-i18n="pad"></span> <input type="range" id="pad" min="0" max="500" step="10" value="0"><output id="padOut">0 ms</output></label>
       </div>
 
-      <!-- Queued File Chips -->
       <div class="file-list" id="fileList"></div>
 
-      <!-- Primary Action Bar with Scissors Icon -->
       <div class="action-bar">
         <button type="button" class="go" id="go" disabled>
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1211,7 +1205,7 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sshhh Vanisher - The Silence Cropper</title>
-<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="shortcut icon" href="/favicon.ico">
 <link rel="preconnect" href="https://fvonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1873,7 +1867,6 @@ try {
 
 <main>
   <section class="hero">
-    <!-- Pill Tab Switcher with Music Note & Folder Icons + accent-surface gradient -->
     <div class="tabs" role="tablist">
       <button class="tab" role="tab" aria-selected="true" data-mode="file">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
@@ -1891,7 +1884,6 @@ try {
     <div class="workbench">
       <input type="file" id="file" accept=".mp3,audio/mpeg" hidden>
 
-      <!-- Tall Recessed Clay Dropzone Well -->
       <div class="dropzone" id="drop" tabindex="0" role="button">
         <div class="drop-icon-mold">
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -1902,16 +1894,13 @@ try {
         <p id="dropSub"></p>
       </div>
 
-      <!-- Cut Below & Keep Padding Sliders -->
       <div class="opts">
         <label><span data-i18n="cut"></span> <input type="range" id="thr" min="-60" max="-5" value="-40"><output id="thrOut">-40 dB</output></label>
         <label><span data-i18n="pad"></span> <input type="range" id="pad" min="0" max="500" step="10" value="0"><output id="padOut">0 ms</output></label>
       </div>
 
-      <!-- Queued File Chips -->
       <div class="file-list" id="fileList"></div>
 
-      <!-- Primary Action Bar with Scissors Icon -->
       <div class="action-bar">
         <button type="button" class="go" id="go" disabled>
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
