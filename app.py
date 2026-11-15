@@ -1211,8 +1211,8 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sshhh Vanisher - The Silence Cropper</title>
-<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-<link rel="shortcut icon" href="/favicon.ico">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.ico">
+<link rel="shortcut icon" href="/static/favicon.ico">
 <link rel="preconnect" href="https://fvonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
@@ -1856,7 +1856,7 @@ try {
 <header class="navbar">
   <a href="/" class="logo">
     <span class="logo-mold">
-      <img src="/static/favicon.svg" width="24" height="24" alt="">
+      <img src="/static/favicon.ico" width="24" height="24" alt="">
     </span>
     <div><b>sshhh</b>Vanisher</div>
   </a>
