@@ -229,7 +229,7 @@ def download_all():
     buf.seek(0)
     return send_file(buf, as_attachment=True, download_name="silencecropper.zip", mimetype="application/zip")
 
-@app.get("/static/favicon.svg")
+@app.get("/favicon.svg")
 def favicon():
     return send_from_directory(
         os.path.dirname(os.path.abspath(__file__)),
@@ -892,7 +892,7 @@ try {
 <header class="navbar">
   <a href="/" class="logo">
     <span class="logo-mold">
-      <img src="/static/favicon.svg" alt="Spotipai Donloder" width="24" height="24">
+      <img src="/favicon.ico" width="24" height="24" >
     </span>
     <div><b>sshhh</b>Vanisher</div>
   </a>
@@ -1210,8 +1210,8 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>sshhh Vanisher — Silence Cropper</title>
-<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<title>sshhh Vanisher - The Silence Cropper</title>
+<link rel="icon" href="/favicon.ico">
 <link rel="preconnect" href="https://fvonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
@@ -1855,7 +1855,7 @@ try {
 <header class="navbar">
   <a href="/" class="logo">
     <span class="logo-mold">
-      <img src="/static/favicon.svg" width="24" height="24" alt="">
+      <img src="/favicon.ico" width="24" height="24" alt="">
     </span>
     <div><b>sshhh</b>Vanisher</div>
   </a>
