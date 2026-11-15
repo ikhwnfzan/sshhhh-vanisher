@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Background Color -->
+  <rect width="128" height="128" rx="28" fill="#0aa4c4" />
+  
+  <!-- Outer Left Red Bar -->
+  <rect x="22" y="46" width="10" height="36" rx="5" fill="#ef4444" />
+  
+  <!-- Inner Left White Bar -->
+  <rect x="38" y="28" width="10" height="72" rx="5" fill="#ffffff" />
+  
+  <!-- Center Tall White Bar -->
+  <rect x="54" y="16" width="10" height="96" rx="5" fill="#ffffff" />
+  
+  <!-- Inner Right White Bar -->
+  <rect x="70" y="28" width="10" height="72" rx="5" fill="#ffffff" />
+  
+  <!-- Outer Right Red Bar -->
+  <rect x="86" y="46" width="10" height="36" rx="5" fill="#ef4444" />
+</svg>

@@ -112,66 +112,6 @@ def download_all():
     return send_file(buf, as_attachment=True, download_name="silencecropper.zip", mimetype="application/zip")
 
 
-FAVICON = base64.b64decode(
-    "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"
-    "8gAAAABJRU5ErkJggg=="
-)
-
-
-@app.get("/favicon.ico")
-def favicon():
-    return send_file(io.BytesIO(FAVICON), mimetype="image/x-icon", max_age=86400)
-
-
 @app.get("/")
 def index():
     return render_template_string(PAGE)
@@ -183,7 +123,7 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sshhh Vanisher — Silence Cropper</title>
-<link rel="icon" href="/favicon.ico">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
@@ -195,7 +135,7 @@ try {
 </script>
 <style>
   /* =========================================================
-     CLAYMORPHISM (MOLD / CLAY) DESIGN SYSTEM
+     CLAYMORPHISM DESIGN
      ========================================================= */
   :root, :root[data-theme="light"] {
     --bg: #e7ecf5;
@@ -232,6 +172,7 @@ try {
       inset -3px -4px 8px rgba(4, 105, 127, 0.45);
 
     --acc: #F46096;
+    --accent-surface: linear-gradient(145deg, var(--pri), var(--acc));
     --acc-surface: linear-gradient(145deg, #ff74a7, #e04880);
     --shadow-clay-acc:
       6px 8px 16px rgba(244, 96, 150, 0.3),
@@ -433,13 +374,13 @@ try {
      HERO & MOLDED WORKBENCH
      ========================================================= */
   .hero {
-    max-width: 880px;
+    max-width: 840px;
     margin: 38px auto 48px;
     padding: 0 20px;
     text-align: center;
   }
 
-  /* Mode Switcher Well (FILE / BATCH) */
+  /* Pill Tab Switcher (clay.py style with accent-surface gradient) */
   .tabs {
     display: inline-flex;
     align-items: center;
@@ -468,7 +409,7 @@ try {
   }
   .tab:hover:not([aria-selected="true"]) { color: var(--text); }
   .tab[aria-selected="true"] {
-    background: var(--pri-surface);
+    background: var(--accent-surface);
     color: #fff;
     box-shadow: var(--shadow-clay-pri);
     transform: translateY(-1px);
@@ -487,7 +428,7 @@ try {
     margin: 0 0 32px;
   }
 
-  /* Sculpted Clay Card Container */
+  /* Sculpted Clay Workbench Card */
   .workbench {
     background: var(--clay-surface);
     border-radius: 32px;
@@ -496,65 +437,44 @@ try {
     text-align: left;
   }
 
-  .row {
-    display: flex;
-    gap: 14px;
-    align-items: stretch;
-  }
-
-  /* Recessed Clay Drop Well */
-  .drop {
-    flex: 1;
+  /* Tall Recessed Clay Dropzone Well (from clay.py) */
+  .dropzone {
     background: var(--clay-well);
-    color: var(--text-muted);
     border-radius: 24px;
-    padding: 0 22px;
-    height: 68px;
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    cursor: pointer;
-    font-size: 1rem;
-    font-weight: 800;
-    min-width: 0;
+    padding: 36px 24px;
+    text-align: center;
     box-shadow: var(--shadow-clay-well);
-    border: 2px dashed rgba(10, 164, 196, 0.35);
+    border: 2.5px dashed rgba(10, 164, 196, 0.35);
+    cursor: pointer;
     transition: border-color 0.2s ease, transform 0.2s ease;
   }
-  .drop:hover, .drop.over {
+  .dropzone:hover, .dropzone.over {
     border-color: var(--pri);
-    transform: scale(1.005);
+    transform: scale(1.006);
   }
-  .drop svg { color: var(--pri); flex: none; }
-  .drop span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .drop-icon-mold {
+    width: 62px;
+    height: 62px;
+    margin: 0 auto 14px;
+    border-radius: 22px;
+    background: var(--clay-surface);
+    box-shadow: var(--shadow-clay-pill);
+    color: var(--pri);
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
-  .drop.has span { color: var(--text); }
-
-  .go {
-    background: var(--pri-surface);
-    color: #fff;
-    border: none;
-    border-radius: 24px;
-    font-family: inherit;
+  .dropzone h3 {
+    margin: 0 0 6px;
+    font-size: 1.15rem;
     font-weight: 900;
-    font-size: 1.05rem;
-    padding: 0 34px;
-    cursor: pointer;
-    box-shadow: var(--shadow-clay-pri);
-    transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.15s ease;
-    white-space: nowrap;
   }
-  .go:hover:not(:disabled) {
-    transform: translateY(-2px);
-    filter: brightness(1.04);
+  .dropzone p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    font-weight: 700;
   }
-  .go:active:not(:disabled) {
-    transform: translateY(2px) scale(0.97);
-  }
-  .go:disabled { opacity: 0.6; cursor: wait; }
 
   /* Slider Controls Strip */
   .opts {
@@ -564,7 +484,7 @@ try {
     justify-content: space-between;
     margin-top: 22px;
     background: var(--clay-well);
-    padding: 16px 22px;
+    padding: 15px 22px;
     border-radius: 22px;
     box-shadow: var(--shadow-clay-well);
     color: var(--text-muted);
@@ -593,6 +513,112 @@ try {
     accent-color: var(--pri);
     cursor: pointer;
   }
+
+  /* Queued File Chips (from clay.py) */
+  .file-list {
+    margin-top: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 240px;
+    overflow-y: auto;
+    padding: 4px;
+  }
+  .file-item {
+    background: var(--clay-surface);
+    border-radius: 18px;
+    padding: 11px 16px;
+    box-shadow: var(--shadow-clay-pill);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 0.9rem;
+    font-weight: 700;
+  }
+  .file-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .file-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .file-size {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    flex-shrink: 0;
+  }
+  .remove-file-btn {
+    background: var(--clay-well);
+    border: none;
+    color: var(--text-muted);
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-weight: 900;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .remove-file-btn:hover { color: var(--err-ink); }
+
+  /* Primary Action Bar: Crop Silence (with Scissors Icon) + Clear */
+  .action-bar {
+    margin-top: 22px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  .go {
+    flex: 1;
+    background: var(--pri);
+    color: #fff;
+    border: none;
+    border-radius: 22px;
+    padding: 16px 26px;
+    font-family: inherit;
+    font-size: 1.04rem;
+    font-weight: 900;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    box-shadow: var(--shadow-clay-pri);
+    transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.15s ease;
+  }
+  .go:hover:not(:disabled) {
+    transform: translateY(-2px);
+    filter: brightness(1.04);
+  }
+  .go:active:not(:disabled) {
+    transform: translateY(2px) scale(0.98);
+  }
+  .go:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .btn-clear {
+    background: var(--clay-surface);
+    color: var(--text-muted);
+    border: none;
+    border-radius: 22px;
+    padding: 16px 22px;
+    font-family: inherit;
+    font-size: 0.94rem;
+    font-weight: 800;
+    cursor: pointer;
+    box-shadow: var(--shadow-clay-pill);
+    transition: transform 0.15s ease, color 0.15s ease;
+  }
+  .btn-clear:hover { color: var(--text); transform: translateY(-1px); }
 
   /* =========================================================
      RESULTS & WAVEFORM CARDS
@@ -696,7 +722,7 @@ try {
   /* Molded FAQ Section */
   #faq {
     margin: 48px auto 0;
-    max-width: 880px;
+    max-width: 840px;
     background: var(--clay-surface);
     border-radius: 32px;
     padding: 28px 32px;
@@ -722,7 +748,7 @@ try {
     font-weight: 700;
   }
 
-  button:focus-visible, .drop:focus-visible, a:focus-visible {
+  button:focus-visible, .dropzone:focus-visible, a:focus-visible {
     outline: 3px solid var(--acc);
     outline-offset: 2px;
   }
@@ -731,8 +757,8 @@ try {
     .navbar { margin: 12px 14px 0; width: auto; padding: 12px 16px; border-radius: 22px; }
     .nav-faq { display: none; }
     .workbench { padding: 20px; border-radius: 26px; }
-    .row { flex-direction: column; }
-    .go { height: 60px; }
+    .action-bar { flex-direction: column; }
+    .go, .btn-clear { width: 100%; }
   }
 </style>
 </head>
@@ -741,7 +767,7 @@ try {
 <header class="navbar">
   <a href="/" class="logo">
     <span class="logo-mold">
-      <img src="/favicon.ico" width="24" height="24" alt="">
+      <img src="/static/favicon.svg" width="24" height="24" alt="">
     </span>
     <div><b>sshhh</b>Vanisher</div>
   </a>
@@ -758,27 +784,53 @@ try {
 
 <main>
   <section class="hero">
+    <!-- Pill Tab Switcher with Music Note & Folder Icons + accent-surface gradient -->
     <div class="tabs" role="tablist">
-      <button class="tab" role="tab" aria-selected="true" data-mode="file" data-i18n="tabFile"></button>
-      <button class="tab" role="tab" aria-selected="false" data-mode="batch" data-i18n="tabBatch"></button>
+      <button class="tab" role="tab" aria-selected="true" data-mode="file">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        <span data-i18n="tabFile">SINGLE MP3</span>
+      </button>
+      <button class="tab" role="tab" aria-selected="false" data-mode="batch">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        <span data-i18n="tabBatch">BATCH / FOLDER</span>
+      </button>
     </div>
 
     <h1>Silence Cropper</h1>
     <p class="sub" data-i18n="sub"></p>
 
     <div class="workbench">
-      <div class="row">
-        <div class="drop" id="drop" tabindex="0" role="button">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 20h16"/></svg>
-          <span id="dropText"></span>
-        </div>
-        <button class="go" id="go"></button>
-      </div>
       <input type="file" id="file" accept=".mp3,audio/mpeg" hidden>
 
+      <!-- Tall Recessed Clay Dropzone Well -->
+      <div class="dropzone" id="drop" tabindex="0" role="button">
+        <div class="drop-icon-mold">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <h3 id="dropTitle"></h3>
+        <p id="dropSub"></p>
+      </div>
+
+      <!-- Cut Below & Keep Padding Sliders -->
       <div class="opts">
         <label><span data-i18n="cut"></span> <input type="range" id="thr" min="-60" max="-5" value="-40"><output id="thrOut">-40 dB</output></label>
         <label><span data-i18n="pad"></span> <input type="range" id="pad" min="0" max="500" step="10" value="0"><output id="padOut">0 ms</output></label>
+      </div>
+
+      <!-- Queued File Chips -->
+      <div class="file-list" id="fileList"></div>
+
+      <!-- Primary Action Bar with Scissors Icon -->
+      <div class="action-bar">
+        <button type="button" class="go" id="go" disabled>
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/>
+          </svg>
+          <span id="goText"></span>
+        </button>
+        <button type="button" class="btn-clear" id="clearBtn" style="display:none;" data-i18n="btnClear">Clear</button>
       </div>
     </div>
 
@@ -799,14 +851,17 @@ try {
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = ms => { const s = Math.round(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+const fmtBytes = b => b < 1024 * 1024 ? (b / 1024).toFixed(1) + ' KB' : (b / (1024 * 1024)).toFixed(2) + ' MB';
 
 const T = {
   en: {
-    tabFile: 'FILE', tabBatch: 'BATCH',
+    tabFile: 'SINGLE MP3', tabBatch: 'BATCH / FOLDER',
     sub: 'Cut the quiet intro and outro off your MP3s. Nothing leaves your computer.',
-    dropOne: 'Choose or drop an MP3 file', dropMany: 'Choose or drop MP3 files',
-    nFiles: n => n + ' files selected', pickFirst: 'Pick an MP3 first',
-    trim: 'Trim', trimming: 'Trimming…',
+    dropSingleTitle: 'Drop an MP3 file here or click to browse',
+    dropSingleSub: 'Supports 320kbps MP3 with embedded ID3 cover art',
+    dropBatchTitle: 'Drop multiple MP3 files here or click to select',
+    dropBatchSub: 'Select multiple .mp3 tracks to trim in batch and download as ZIP',
+    crop: 'Crop Silence', cropping: 'Cropping silence…', btnClear: 'Clear',
     cut: 'Cut below', pad: 'Keep padding',
     tagsKept: 'Tags kept', removed: s => s + 's removed', intro: 'Intro', outro: 'Outro',
     dl: '⬇ Download MP3', zip: 'Download all as ZIP',
@@ -817,11 +872,13 @@ const T = {
     q3: 'Are tags and cover art kept?', a3: 'Yes. Title, artist, album, cover art and other ID3 tags are copied from the original to the trimmed file.'
   },
   id: {
-    tabFile: 'FILE', tabBatch: 'MASSAL',
+    tabFile: 'SATU MP3', tabBatch: 'BATCH / BANYAK FILE',
     sub: 'Potong intro dan outro yang sunyi dari MP3 kamu. Tidak ada yang keluar dari komputermu.',
-    dropOne: 'Pilih atau seret file MP3', dropMany: 'Pilih atau seret file MP3',
-    nFiles: n => n + ' file dipilih', pickFirst: 'Pilih MP3 dulu',
-    trim: 'Potong', trimming: 'Memotong…',
+    dropSingleTitle: 'Tarik satu file MP3 ke sini atau klik untuk memilih',
+    dropSingleSub: 'Mendukung MP3 320kbps dengan cover art ID3 tertanam',
+    dropBatchTitle: 'Tarik banyak file MP3 ke sini atau klik untuk memilih',
+    dropBatchSub: 'Pilih beberapa file .mp3 sekaligus untuk dipotong dan diunduh sebagai ZIP',
+    crop: 'Potong Hening', cropping: 'Memotong hening…', btnClear: 'Hapus',
     cut: 'Potong di bawah', pad: 'Sisakan jeda',
     tagsKept: 'Tag dipertahankan', removed: s => s + ' dtk dipotong', intro: 'Intro', outro: 'Outro',
     dl: '⬇ Unduh MP3', zip: 'Unduh semua (ZIP)',
@@ -852,12 +909,50 @@ $('#bitrate').onclick = e => {
   e.currentTarget.setAttribute('aria-label', `Output bitrate: ${next}bps MP3. Click to change`);
 };
 
-let pickHint = false;
 function refreshDrop() {
-  $('#dropText').textContent = pickHint ? t('pickFirst') : !files.length ? t(mode === 'file' ? 'dropOne' : 'dropMany')
-    : files.length === 1 ? files[0].name : t('nFiles', files.length);
+  $('#dropTitle').textContent = t(mode === 'file' ? 'dropSingleTitle' : 'dropBatchTitle');
+  $('#dropSub').textContent = t(mode === 'file' ? 'dropSingleSub' : 'dropBatchSub');
 }
-function setBtn() { $('#go').textContent = t(busy ? 'trimming' : 'trim'); }
+function setBtn() {
+  $('#goText').textContent = t(busy ? 'cropping' : 'crop');
+}
+
+function renderFileList() {
+  const list = $('#fileList');
+  list.replaceChildren();
+  files.forEach((f, idx) => {
+    const item = document.createElement('div');
+    item.className = 'file-item';
+
+    const meta = document.createElement('div');
+    meta.className = 'file-item-meta';
+
+    const name = document.createElement('span');
+    name.className = 'file-name';
+    name.textContent = f.name;
+
+    const size = document.createElement('span');
+    size.className = 'file-size';
+    size.textContent = fmtBytes(f.size);
+
+    meta.append(name, size);
+
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'remove-file-btn';
+    rm.textContent = '×';
+    rm.onclick = () => {
+      files.splice(idx, 1);
+      renderFileList();
+    };
+
+    item.append(meta, rm);
+    list.append(item);
+  });
+
+  $('#go').disabled = busy || files.length === 0;
+  $('#clearBtn').style.display = files.length > 0 ? 'inline-flex' : 'none';
+}
 
 function draw(canvas, d) {
   const css = getComputedStyle(document.documentElement);
@@ -924,31 +1019,45 @@ document.querySelectorAll('.tab').forEach(tb => tb.onclick = () => {
   mode = tb.dataset.mode;
   document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x === tb));
   input.multiple = mode === 'batch';
-  setFiles([]);
-});
-function setFiles(list) {
-  files = [...list].filter(f => /\.mp3$/i.test(f.name));
-  if (mode === 'file') files = files.slice(0, 1);
-  pickHint = false;
-  drop.classList.toggle('has', files.length > 0);
+  files = [];
+  last = [];
+  failed = false;
+  renderFileList();
+  render();
   refreshDrop();
+});
+
+function addFiles(list) {
+  const mp3s = [...list].filter(f => /\.mp3$/i.test(f.name));
+  if (!mp3s.length) return;
+  if (mode === 'file') {
+    files = [mp3s[0]];
+  } else {
+    files = [...files, ...mp3s];
+  }
+  renderFileList();
 }
+
 drop.onclick = () => input.click();
 drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } };
-input.onchange = () => setFiles(input.files);
+input.onchange = () => { if (input.files.length) addFiles(input.files); input.value = ''; };
 ['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
-drop.addEventListener('drop', e => setFiles(e.dataTransfer.files));
+drop.addEventListener('drop', e => { if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
+
+$('#clearBtn').onclick = () => {
+  files = [];
+  last = [];
+  failed = false;
+  renderFileList();
+  render();
+};
 
 $('#thr').oninput = e => $('#thrOut').textContent = e.target.value + ' dB';
 $('#pad').oninput = e => $('#padOut').textContent = e.target.value + ' ms';
 
 $('#go').onclick = async () => {
-  if (!files.length) {
-    pickHint = true;
-    refreshDrop();
-    return;
-  }
+  if (!files.length) return;
   busy = true; failed = false; last = []; setBtn(); $('#go').disabled = true; render();
   const fd = new FormData();
   files.forEach(f => fd.append('files', f));
@@ -959,7 +1068,7 @@ $('#go').onclick = async () => {
     const res = await fetch('/api/trim', { method: 'POST', body: fd });
     last = await res.json();
   } catch (e) { failed = true; }
-  busy = false; $('#go').disabled = false; setBtn(); render();
+  busy = false; $('#go').disabled = files.length === 0; setBtn(); render();
 };
 
 applyLang(lang);
