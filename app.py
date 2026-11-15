@@ -11,7 +11,7 @@ from mutagen.id3 import ID3
 from pydub import AudioSegment
 from pydub.silence import detect_leading_silence
 
-app = Flask(__name__, static_folder="static")
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB per request
 
 WORK = Path(tempfile.mkdtemp(prefix="silencecropper_"))
