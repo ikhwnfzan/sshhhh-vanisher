@@ -10,7 +10,7 @@ from mutagen.id3 import ID3
 from pydub import AudioSegment
 from pydub.silence import detect_leading_silence
 
-app = Flask(__name__, static_folder="static")
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB per request
 
 WORK = Path(tempfile.mkdtemp(prefix="silencecropper_"))
@@ -232,8 +232,7 @@ def download_all():
 def favicon():
     return send_from_directory(
         os.path.join(app.root_path, "static"),
-        "favicon.svg",
-        mimetype="image/svg+xml",
+        "favicon.ico",
     )
 
 @app.get("/")
@@ -891,7 +890,7 @@ try {
 <header class="navbar">
   <a href="/" class="logo">
     <span class="logo-mold">
-      <img src="/favicon.ico" width="24" height="24" >
+      <img src="/static/favicon.ico" width="24" height="24" >
     </span>
     <div><b>sshhh</b>Vanisher</div>
   </a>
@@ -1205,8 +1204,8 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sshhh Vanisher - The Silence Cropper</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="shortcut icon" href="/favicon.ico">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.ico">
+<link rel="shortcut icon" href="/static/favicon.ico">
 <link rel="preconnect" href="https://fvonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
@@ -1850,7 +1849,7 @@ try {
 <header class="navbar">
   <a href="/" class="logo">
     <span class="logo-mold">
-      <img src="/static/favicon.svg" width="24" height="24" alt="">
+      <img src="/static/favicon.ico" width="24" height="24" alt="">
     </span>
     <div><b>sshhh</b>Vanisher</div>
   </a>
