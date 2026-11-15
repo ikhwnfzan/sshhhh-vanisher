@@ -16,7 +16,7 @@ ENV PATH="/home/user/.local/bin:$PATH" \
 WORKDIR /home/user/app
 COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY --chown=user app.py .
+COPY --chown=user . .
 
 # Render gives the port in $PORT. One worker, because the list of trimmed files is kept in memory.
 CMD ["sh", "-c", "gunicorn --workers 1 --threads 2 --timeout 600 --bind 0.0.0.0:${PORT:-10000} app:app"]
