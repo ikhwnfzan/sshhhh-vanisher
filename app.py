@@ -1,634 +1,1111 @@
-import base64
-import io
 import os
+import re
 import shutil
-import socket
 import subprocess
-import sys
 import tempfile
 import threading
-import time
 import uuid
-import webbrowser
 import zipfile
-from pathlib import Path
 
-# When packaged as an .exe, ffmpeg / ffprobe / yt-dlp are unpacked into <bundle>/bin.
-# A copy placed next to the .exe wins, so yt-dlp can be updated by replacing yt-dlp.exe.
-# This must run before pydub is imported, because pydub looks for ffmpeg on import.
-_here = Path(__file__).resolve().parent
-_bundle = Path(getattr(sys, "_MEIPASS", _here))
-_exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else _here
-os.environ["PATH"] = os.pathsep.join([str(_exe_dir), str(_bundle / "bin"), os.environ.get("PATH", "")])
-
-from flask import Flask, abort, jsonify, render_template_string, request, send_file
-from mutagen.id3 import ID3
+from flask import Flask, jsonify, render_template_string, request, send_file
+from mutagen.id3 import ID3, error as ID3Error
 from mutagen.mp3 import MP3
-from pydub import AudioSegment
-from pydub.silence import detect_leading_silence
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-# Limits for a public server (0 = no limit). Set them as environment variables.
-MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "500"))  # whole request
-MAX_FILE_MB = float(os.environ.get("MAX_FILE_MB", "0"))      # one file
-MAX_MINUTES = float(os.environ.get("MAX_MINUTES", "0"))      # one song
-app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB max upload
 
-WORK = Path(tempfile.mkdtemp(prefix="silencecropper_"))
-ALLOW_LINK = os.environ.get("ALLOW_LINK", "1") == "1"  # set ALLOW_LINK=0 on a public server
-KEEP_SECONDS = 30 * 60  # trimmed files are deleted after 30 minutes
-RESULTS = {}  # id -> {"path": Path, "name": str}
-BITRATES = {"128k", "192k", "256k", "320k"}
+JOBS: dict[str, dict] = {}
+WORK_DIR = os.path.join(tempfile.gettempdir(), "silence_cropper_jobs")
+os.makedirs(WORK_DIR, exist_ok=True)
 
 
-def find_cuts(audio, threshold_db, padding_ms, chunk_ms=10):
-    """Return (start_ms, end_ms) of the part to keep."""
-    lead = detect_leading_silence(audio, silence_threshold=threshold_db, chunk_size=chunk_ms)
-    tail = detect_leading_silence(audio.reverse(), silence_threshold=threshold_db, chunk_size=chunk_ms)
-    if lead + tail >= len(audio):  # whole file is quieter than the threshold
-        return 0, len(audio)
-    return max(0, lead - padding_ms), min(len(audio), len(audio) - tail + padding_ms)
+def _sanitize(name: str) -> str:
+    base = secure_filename(name)
+    return base or "audio.mp3"
 
 
-def waveform(audio, bins=160):
-    """Peak level (0..1) for each of `bins` slices of the track."""
-    step = max(1, len(audio) // bins)
-    peak = audio.max_possible_amplitude or 1
-    return [round(audio[i * step:(i + 1) * step].max / peak, 3) for i in range(bins)]
+def _crop_silence_mp3(input_path: str, output_path: str, threshold_db: float = -40.0, bitrate: int = 320):
+    """
+    Trim intro & outro silence below threshold_db using FFmpeg silenceremove,
+    encode at 320kbps MP3, and copy over original ID3 tags (including cover art).
+    """
+    # Trim leading silence, reverse, trim trailing silence, reverse back
+    af_filter = (
+        f"silenceremove=start_periods=1:start_duration=0:start_threshold={threshold_db}dB,"
+        f"areverse,"
+        f"silenceremove=start_periods=1:start_duration=0:start_threshold={threshold_db}dB,"
+        f"areverse"
+    )
 
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        input_path,
+        "-af",
+        af_filter,
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        f"{bitrate}k",
+        "-map_metadata",
+        "0",
+        "-id3v2_version",
+        "3",
+        output_path,
+    ]
+    subprocess.run(cmd, check=True)
 
-def read_tags(path):
-    """Return the ID3 tags (title, artist, cover art, ...) of an MP3, or None."""
+    # Ensure full ID3v2 tags (such as APIC album art) are preserved cleanly
     try:
-        tags = ID3(str(path))
-    except Exception:  # no tags, or not readable
-        return None
-    tags.delall("TLEN")  # the old length would be wrong after trimming
-    return tags if len(tags) else None
+        src_tags = ID3(input_path)
+        dst_audio = MP3(output_path, ID3=ID3)
+        try:
+            dst_audio.add_tags()
+        except ID3Error:
+            pass
+        for frame in src_tags.values():
+            dst_audio.tags.add(frame)
+        dst_audio.save(v2_version=3)
+    except Exception:
+        pass
 
 
-def fetch_audio(url):
-    """Download a link with yt-dlp and return (AudioSegment, title, tags)."""
-    if not url.startswith(("http://", "https://")):
-        raise ValueError("Enter a full link that starts with https://")
-    exe = shutil.which("yt-dlp")
-    if not exe:
-        raise RuntimeError("yt-dlp was not found on your PATH")
-    tmp = Path(tempfile.mkdtemp(dir=WORK))
+def _process_job(job_id: str, saved_inputs: list[tuple[str, str]], threshold_db: float, bitrate: int):
+    job_dir = os.path.join(WORK_DIR, job_id)
+    out_dir = os.path.join(job_dir, "out")
+    os.makedirs(out_dir, exist_ok=True)
+
+    total = len(saved_inputs)
+    processed_files: list[tuple[str, str]] = []
+
     try:
-        proc = subprocess.run(
-            [exe, "-x", "--audio-format", "mp3", "--audio-quality", "0", "--no-playlist",
-             "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg",
-             "-o", str(tmp / "%(title).120B.%(ext)s"), url],
-            capture_output=True, text=True, timeout=900)
-        found = list(tmp.glob("*.mp3"))
-        if proc.returncode or not found:
-            lines = proc.stderr.strip().splitlines()
-            raise RuntimeError(lines[-1] if lines else "yt-dlp could not download this link")
-        return AudioSegment.from_file(str(found[0])), found[0].stem, read_tags(found[0])
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        for idx, (orig_name, in_path) in enumerate(saved_inputs, start=1):
+            JOBS[job_id]["completed"] = idx - 1
+            JOBS[job_id]["currentFile"] = orig_name
 
+            stem, _ = os.path.splitext(orig_name)
+            out_name = f"{stem}_cropped.mp3"
+            out_path = os.path.join(out_dir, f"{idx:03d}_{_sanitize(out_name)}")
 
-@app.errorhandler(413)
-def too_big(_):
-    return jsonify([{"name": "upload", "error": f"The upload is bigger than {MAX_UPLOAD_MB} MB."}]), 413
-
-
-def check_limits(path):
-    """Reject files over the size or length limit before decoding (decoding is what uses memory)."""
-    if MAX_FILE_MB and path.stat().st_size > MAX_FILE_MB * 1024 * 1024:
-        raise ValueError(f"File is {path.stat().st_size / 1048576:.1f} MB. The limit on this server is {MAX_FILE_MB:g} MB.")
-    if MAX_MINUTES:
-        minutes = MP3(str(path)).info.length / 60
-        if minutes > MAX_MINUTES:
-            raise ValueError(f"Song is {minutes:.1f} min long. The limit on this server is {MAX_MINUTES:g} min.")
-
-
-def purge_old():
-    """Delete trimmed files older than KEEP_SECONDS so a public server does not fill its disk."""
-    now = time.time()
-    for rid in [k for k, v in RESULTS.items() if now - v.get("t", now) > KEEP_SECONDS]:
-        RESULTS.pop(rid)["path"].unlink(missing_ok=True)
-
-
-@app.post("/api/trim")
-def api_trim():
-    purge_old()
-    threshold = max(-90.0, min(0.0, float(request.form.get("threshold", -40))))
-    padding = max(0, min(2000, int(float(request.form.get("padding", 0)))))
-    bitrate = request.form.get("bitrate", "320k")
-    if bitrate not in BITRATES:
-        bitrate = "320k"
-
-    def make_item(audio, stem, tags=None):
-        start, end = find_cuts(audio, threshold, padding)
-        rid = uuid.uuid4().hex
-        out = WORK / f"{rid}.mp3"
-        audio[start:end].export(out, format="mp3", bitrate=bitrate)
-        if tags:  # copy title, artist, album, cover art, ... onto the trimmed file
             try:
-                tags.save(str(out), v2_version=3)
-            except Exception:
-                tags = None
-        RESULTS[rid] = {"path": out, "name": f"{stem}_trimmed.mp3", "t": time.time()}
-        return {"id": rid, "name": f"{stem}.mp3", "duration": len(audio),
-                "start": start, "end": end, "peaks": waveform(audio),
-                "threshold": threshold, "bitrate": bitrate, "tags": bool(tags)}
+                _crop_silence_mp3(in_path, out_path, threshold_db=threshold_db, bitrate=bitrate)
+                if os.path.exists(out_path):
+                    processed_files.append((out_path, out_name))
+            except Exception as e:
+                if total == 1:
+                    raise e
+                continue
 
-    items = []
-    url = request.form.get("url", "").strip()
-    if url and not ALLOW_LINK:
-        items.append({"name": url, "error": "Link download is turned off on this server."})
-    elif url:
-        try:
-            audio, stem, tags = fetch_audio(url)
-            items.append(make_item(audio, stem, tags))
-        except Exception as e:
-            items.append({"name": url, "error": str(e)[:300]})
-    for f in request.files.getlist("files"):
-        src = WORK / f"{uuid.uuid4().hex}_src.mp3"
-        try:
-            f.save(src)
-            check_limits(src)
-            items.append(make_item(AudioSegment.from_file(str(src)),
-                                   Path(f.filename or "track").stem or "track", read_tags(src)))
-        except Exception as e:  # unreadable file, ffmpeg missing, etc.
-            items.append({"name": f.filename, "error": str(e)[:200]})
-        finally:
-            src.unlink(missing_ok=True)
-    return jsonify(items)
+        if not processed_files:
+            JOBS[job_id] = {"status": "failed", "error": "FFmpeg failed to crop audio."}
+            return
 
+        if len(processed_files) == 1:
+            final_path, final_name = processed_files[0]
+            JOBS[job_id] = {
+                "status": "ready",
+                "completed": 1,
+                "total": 1,
+                "filePath": final_path,
+                "filename": final_name,
+                "mimetype": "audio/mpeg",
+                "downloadLink": f"/api/download/{job_id}",
+            }
+        else:
+            zip_path = os.path.join(job_dir, "cropped_tracks.zip")
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
+                for full_path, arcname in processed_files:
+                    zf.write(full_path, arcname=arcname)
 
-@app.get("/download/<rid>")
-def download(rid):
-    r = RESULTS.get(rid) or abort(404)
-    return send_file(r["path"], as_attachment=True, download_name=r["name"], mimetype="audio/mpeg")
-
-
-@app.get("/play/<rid>")
-def play(rid):
-    r = RESULTS.get(rid) or abort(404)
-    return send_file(r["path"], mimetype="audio/mpeg")  # inline, so the player can seek
+            JOBS[job_id] = {
+                "status": "ready",
+                "completed": total,
+                "total": total,
+                "filePath": zip_path,
+                "filename": "cropped_mp3_batch.zip",
+                "mimetype": "application/zip",
+                "downloadLink": f"/api/download/{job_id}",
+            }
+    except Exception as e:
+        JOBS[job_id] = {"status": "failed", "error": str(e)}
 
 
-@app.get("/download-all")
-def download_all():
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
-        for rid in request.args.get("ids", "").split(","):
-            if rid in RESULTS:
-                z.write(RESULTS[rid]["path"], RESULTS[rid]["name"])
-    buf.seek(0)
-    return send_file(buf, as_attachment=True, download_name="silencecropper.zip", mimetype="application/zip")
+@app.post("/api/crop")
+def start_crop():
+    files = request.files.getlist("files")
+    valid_files = [f for f in files if f and f.filename.lower().endswith(".mp3")]
+
+    if not valid_files:
+        return jsonify(error="Please upload at least one .mp3 file."), 400
+
+    try:
+        threshold_db = float(request.form.get("threshold", -40))
+    except ValueError:
+        threshold_db = -40.0
+
+    try:
+      bitrate = int(request.form.get("bitrate", 320))
+    except ValueError:
+      bitrate = 320
+    if bitrate not in {128, 192, 256, 320}:
+      bitrate = 320
+
+    job_id = uuid.uuid4().hex
+    in_dir = os.path.join(WORK_DIR, job_id, "in")
+    os.makedirs(in_dir, exist_ok=True)
+
+    saved_inputs: list[tuple[str, str]] = []
+    for idx, f in enumerate(valid_files, start=1):
+        orig_name = os.path.basename(f.filename)
+        safe_in = os.path.join(in_dir, f"{idx:03d}_{_sanitize(orig_name)}")
+        f.save(safe_in)
+        saved_inputs.append((orig_name, safe_in))
+
+    JOBS[job_id] = {
+        "status": "pending",
+        "completed": 0,
+        "total": len(saved_inputs),
+        "currentFile": saved_inputs[0][0],
+    }
+
+    threading.Thread(
+        target=_process_job,
+        args=(job_id, saved_inputs, threshold_db, bitrate),
+        daemon=True,
+    ).start()
+
+    return jsonify(jobId=job_id, status="pending", total=len(saved_inputs)), 202
 
 
-FAVICON = base64.b64decode(
-    "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"
-    "8gAAAABJRU5ErkJggg=="
-)
+@app.get("/api/status/<job_id>")
+def job_status(job_id: str):
+    job = JOBS.get(job_id)
+    if not job:
+        return jsonify(error="Job not found"), 404
+    return jsonify(
+        status=job["status"],
+        completed=job.get("completed", 0),
+        total=job.get("total", 1),
+        currentFile=job.get("currentFile", ""),
+        downloadLink=job.get("downloadLink"),
+        filename=job.get("filename"),
+        error=job.get("error"),
+    )
 
 
-@app.get("/static/favicon.ico")
-def favicon():
-    return send_file(io.BytesIO(FAVICON), mimetype="image/x-icon", max_age=86400)
+@app.get("/api/download/<job_id>")
+def download_result(job_id: str):
+    job = JOBS.get(job_id)
+    if not job or job.get("status") != "ready":
+        return "File not ready", 404
+    return send_file(
+        job["filePath"],
+        as_attachment=True,
+        download_name=job["filename"],
+        mimetype=job.get("mimetype", "application/octet-stream"),
+    )
 
 
 @app.get("/")
 def index():
-    page = PAGE if ALLOW_LINK else PAGE.replace("</head>", "<style>[data-mode=link]{display:none}</style></head>")
-    return render_template_string(page)
+    return render_template_string(PAGE)
 
 
 PAGE = r"""<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Silence Cropper</title>
-<link rel="icon" href="/static/favicon.ico" sizes="any">
-<script>
-try {
-  const th = localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
-  document.documentElement.dataset.theme = th;
-} catch (e) { document.documentElement.dataset.theme = 'dark'; }
-</script>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.ico">
+<title>sshhhh Vanisher - Crop the Silence In Your MP3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#121212;--card:#1c1c1c;--line:#2b2b2b;--text:#fff;--muted:#a1a1aa;--pri:#0aa4c4;--pri-d:#0b7f97;--acc:#F46096;--acc-ink:#2a0615;--tabs:#1a1a1a;--tag:#2a2a2a;--tag-t:#ccc;--dropb:transparent;--cut:#ef4444;--glow:rgba(10,164,196,.32);--err:#f87171}
-:root[data-theme=light]{--bg:#f4f6f8;--card:#fff;--line:#dde2e8;--text:#14181c;--muted:#5a6572;--pri:#0891b2;--pri-d:#0e7490;--tabs:#e9edf1;--tag:#eef1f5;--tag-t:#39424c;--dropb:#cdd4dc;--cut:#dc2626;--glow:rgba(8,145,178,.22);--err:#c62828}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,"Segoe UI",system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column}
-a{color:inherit;text-decoration:none}
-header{display:flex;align-items:center;gap:16px;padding:16px 48px;flex-wrap:wrap}
-.logo{display:flex;align-items:center;gap:7px;font-weight:900;font-size:26px;letter-spacing:-.5px;margin-right:auto}
-.logo svg{width:24px;height:24px;color:var(--pri);flex:none}
-.logo b{color:var(--pri)}
-.badge{background:var(--acc);color:var(--acc-ink);font-weight:700;border:0;border-radius:8px;padding:9px 16px;font-size:15px;cursor:pointer}
-.bitrate-wrap{position:relative}
-#bitrate{display:flex;align-items:center;gap:10px}
-#bitrate svg{width:12px;height:12px;transition:transform .15s ease}
-#bitrate[aria-expanded=true] svg{transform:rotate(180deg)}
-.bitrate-menu{position:absolute;z-index:5;top:calc(100% + 6px);right:0;min-width:100%;padding:5px;background:var(--card);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 20px #0003}
-.bitrate-menu button{display:block;width:100%;padding:9px 12px;text-align:left;white-space:nowrap;background:none;border:0;border-radius:5px;color:var(--text);font:inherit;cursor:pointer}
-.bitrate-menu button:hover,.bitrate-menu button[aria-selected=true]{background:var(--tag)}
-.nav{font-weight:700;font-size:17px;cursor:pointer;background:none;border:0;color:var(--text)}
-.seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
-.seg button{background:none;border:0;color:var(--muted);font-weight:700;font-size:14px;padding:8px 11px;cursor:pointer}
-.seg button[aria-pressed=true]{background:var(--acc);color:var(--acc-ink)}
-.ico{background:none;border:1px solid var(--line);color:var(--text);border-radius:8px;width:38px;height:36px;font-size:18px;cursor:pointer}
-main{width:100%;max-width:1030px;margin:0 auto;padding:28px 20px 60px;flex:1}
-.tabs{display:flex;width:max-content;margin:0 auto;padding:6px;background:var(--tabs);border:1px solid var(--line);border-radius:12px;gap:4px}
-.tab{background:none;border:0;color:var(--muted);font-weight:700;font-size:16px;padding:12px 24px;border-radius:8px;cursor:pointer;letter-spacing:.5px}
-.tab[aria-selected=true]{background:var(--pri);color:#fff}
-h1{font-size:clamp(40px,7vw,64px);font-weight:900;letter-spacing:-2px;text-align:center;margin:56px 0 12px}
-.sub{text-align:center;color:var(--muted);font-size:20px;margin:0 0 36px}
-.row{display:flex;gap:16px;align-items:stretch}
-.drop{flex:1;background:#fff;color:#111;border-radius:12px;padding:0 22px;height:67px;display:flex;align-items:center;gap:14px;cursor:pointer;font-size:19px;min-width:0;border:2px solid var(--dropb)}
-[hidden]{display:none!important}
-.drop svg{color:var(--pri);flex:none}
-.drop input{flex:1;border:0;outline:0;background:none;font:inherit;color:#111;min-width:0}
-.drop.over{border-color:var(--pri)}
-.drop span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#555}
-.drop.has span{color:#111}
-.go{background:var(--pri);color:#fff;border:0;border-radius:12px;font-weight:700;font-size:20px;padding:0 36px;cursor:pointer;box-shadow:0 0 28px var(--glow)}
-.go:disabled{opacity:.5;cursor:wait}
-.opts{display:flex;gap:40px;flex-wrap:wrap;justify-content:center;margin:26px 0 0;color:var(--muted);font-size:16px}
-.opts label{display:flex;align-items:center;gap:12px}
-.opts output{color:var(--text);font-weight:700;min-width:64px}
-input[type=range]{accent-color:var(--pri);width:200px}
-#results{margin-top:44px;display:grid;gap:18px}
-.item{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px}
-.top{display:flex;gap:20px;align-items:center;flex-wrap:wrap}
-.info{flex:1;min-width:220px}
-.info h3{margin:0 0 6px;font-size:24px;overflow-wrap:anywhere}
-.tags{display:flex;gap:8px;flex-wrap:wrap}
-.tag{background:var(--tag);border:1px solid var(--line);border-radius:6px;padding:5px 11px;font-size:15px;color:var(--tag-t)}
-.tag.hl{color:var(--acc);border-color:var(--acc)}
-.play{width:52px;height:52px;border-radius:50%;border:0;background:var(--pri);color:#fff;font-size:18px;cursor:pointer;flex:none;box-shadow:0 0 18px var(--glow)}
-.dl{background:var(--pri-d);color:#fff;font-weight:700;font-size:17px;border-radius:8px;padding:14px 28px;white-space:nowrap}
-canvas{width:100%;height:90px;margin-top:20px;display:block}
-.err{color:var(--err)}
-.zip{display:block;margin:0 auto;background:none;border:1px solid var(--acc);color:var(--acc);font-weight:700;border-radius:10px;padding:12px 22px;cursor:pointer}
-#faq{margin-top:70px;color:var(--muted);line-height:1.6;max-width:720px;margin-inline:auto}
-#faq h2{color:var(--text);font-size:22px}
-#faq b{color:var(--text)}
-footer{border-top:1px solid var(--line);text-align:center;color:var(--muted);padding:26px;font-size:17px}
-button:focus-visible,.drop:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
-@media(max-width:700px){header{padding:14px 18px;gap:10px}.row{flex-direction:column}.go{height:60px}.nav{display:none}}
+  /* =========================================================
+     CLAYMORPHISM (MOLD / CLAY) DESIGN SYSTEM
+     ========================================================= */
+  :root {
+    --bg: #e7ecf5;
+    --bg-gradient: radial-gradient(circle at 15% 15%, #f3f7ff 0%, #e4eaf4 55%, #dce4f0 100%);
+    --clay-surface: #edf2fa;
+    --clay-surface-hover: #f2f6fd;
+    --clay-well: #dfe6f2;
+    --text: #273043;
+    --text-muted: #68758d;
+
+    --shadow-clay-card:
+      12px 12px 26px rgba(166, 179, 201, 0.55),
+      -10px -10px 22px rgba(255, 255, 255, 0.92),
+      inset 4px 4px 8px rgba(255, 255, 255, 0.85),
+      inset -4px -4px 10px rgba(176, 189, 212, 0.35);
+
+    --shadow-clay-pill:
+      6px 6px 14px rgba(166, 179, 201, 0.45),
+      -6px -6px 14px rgba(255, 255, 255, 0.9),
+      inset 2px 2px 5px rgba(255, 255, 255, 0.8),
+      inset -2px -2px 5px rgba(176, 189, 212, 0.3);
+
+    --shadow-clay-well:
+      inset 6px 6px 12px rgba(166, 179, 201, 0.55),
+      inset -6px -6px 12px rgba(255, 255, 255, 0.92),
+      0 4px 12px rgba(255, 255, 255, 0.5);
+
+    --accent: #0aa4c4;
+    --secondary: #F46096;
+    --accent-surface: linear-gradient(145deg, var(--accent), var(--secondary));
+    --shadow-clay-accent:
+      8px 10px 20px rgba(10, 164, 196, 0.34),
+      -4px -4px 12px rgba(255, 255, 255, 0.75),
+      inset 3px 3px 6px rgba(184, 239, 247, 0.65),
+      inset -3px -4px 8px rgba(4, 105, 127, 0.45);
+
+    --green-surface: linear-gradient(145deg, #27d366, #1db454);
+    --shadow-clay-green:
+      8px 10px 20px rgba(34, 197, 94, 0.34),
+      -4px -4px 12px rgba(255, 255, 255, 0.7),
+      inset 3px 3px 6px rgba(154, 247, 186, 0.65),
+      inset -3px -4px 8px rgba(19, 138, 62, 0.45);
+
+    --yellow-surface: linear-gradient(145deg, #ffe066, #fcc419);
+    --yellow-ink: #3d2e00;
+    --shadow-clay-yellow:
+      6px 6px 14px rgba(224, 172, 16, 0.28),
+      -4px -4px 10px rgba(255, 255, 255, 0.85),
+      inset 2px 2px 5px rgba(255, 250, 214, 0.8),
+      inset -2px -3px 6px rgba(204, 150, 0, 0.35);
+
+    --err-bg: #ffe8eb;
+    --err-ink: #c92a3e;
+    --shadow-clay-err:
+      8px 8px 18px rgba(201, 42, 62, 0.14),
+      -6px -6px 14px rgba(255, 255, 255, 0.85),
+      inset 3px 3px 6px rgba(255, 255, 255, 0.8),
+      inset -3px -3px 7px rgba(224, 135, 148, 0.3);
+  }
+
+  html[data-theme="dark"] {
+    --bg: #1e212b;
+    --bg-gradient: radial-gradient(circle at 15% 15%, #262a37 0%, #1d2029 60%, #171921 100%);
+    --clay-surface: #252936;
+    --clay-surface-hover: #2b303f;
+    --clay-well: #1b1e27;
+    --text: #f1f5fb;
+    --text-muted: #9aa5bc;
+
+    --shadow-clay-card:
+      12px 14px 28px rgba(10, 12, 17, 0.68),
+      -8px -8px 20px rgba(48, 54, 72, 0.42),
+      inset 3px 3px 7px rgba(64, 72, 95, 0.48),
+      inset -4px -5px 10px rgba(13, 15, 22, 0.65);
+
+    --shadow-clay-pill:
+      6px 7px 14px rgba(10, 12, 17, 0.6),
+      -5px -5px 12px rgba(48, 54, 72, 0.38),
+      inset 2px 2px 5px rgba(64, 72, 95, 0.45),
+      inset -2px -3px 6px rgba(13, 15, 22, 0.6);
+
+    --shadow-clay-well:
+      inset 6px 6px 14px rgba(10, 12, 17, 0.72),
+      inset -5px -5px 12px rgba(46, 52, 69, 0.35),
+      0 2px 6px rgba(48, 54, 72, 0.2);
+
+    --shadow-clay-accent:
+      8px 10px 22px rgba(10, 12, 17, 0.65),
+      -4px -4px 12px rgba(48, 54, 72, 0.25),
+      inset 3px 3px 6px rgba(184, 239, 247, 0.45),
+      inset -3px -4px 8px rgba(4, 105, 127, 0.6);
+
+    --shadow-clay-green:
+      8px 10px 22px rgba(13, 18, 15, 0.65),
+      -4px -4px 12px rgba(48, 54, 72, 0.25),
+      inset 3px 3px 6px rgba(134, 239, 172, 0.5),
+      inset -3px -4px 8px rgba(15, 118, 53, 0.6);
+
+    --shadow-clay-yellow:
+      6px 8px 16px rgba(10, 12, 17, 0.55),
+      -3px -3px 10px rgba(48, 54, 72, 0.25),
+      inset 2px 2px 5px rgba(255, 248, 196, 0.75),
+      inset -2px -3px 6px rgba(184, 134, 0, 0.5);
+
+    --err-bg: #352128;
+    --err-ink: #ff8796;
+    --shadow-clay-err:
+      8px 10px 20px rgba(10, 12, 17, 0.6),
+      -5px -5px 12px rgba(48, 54, 72, 0.3),
+      inset 2px 2px 5px rgba(95, 52, 64, 0.45),
+      inset -3px -3px 7px rgba(20, 11, 14, 0.65);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    background-image: var(--bg-gradient);
+    background-attachment: fixed;
+    color: var(--text);
+    font-family: "Nunito", "Inter", system-ui, -apple-system, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    transition: background 0.3s ease, color 0.25s ease;
+  }
+
+  main { flex: 1; }
+
+  /* Molded Navbar */
+  .navbar {
+    width: 100%;
+    max-width: 980px;
+    margin: 18px auto 0;
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--clay-surface);
+    border-radius: 28px;
+    box-shadow: var(--shadow-clay-card);
+  }
+
+  .brand {
+    font-size: 1.38rem;
+    font-weight: 900;
+    letter-spacing: -0.02em;
+    text-decoration: none;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .brand-icon-mold {
+    width: 42px;
+    height: 42px;
+    border-radius: 16px;
+    background: var(--accent);
+    color: #fff;
+    box-shadow: var(--shadow-clay-accent);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .brand span { color: var(--accent); }
+
+  .nav-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .badge-hq {
+    background: var(--yellow-surface);
+    color: var(--yellow-ink);
+    font-weight: 800;
+    font-size: 0.8rem;
+    padding: 8px 15px;
+    border-radius: 999px;
+    box-shadow: var(--shadow-clay-yellow);
+  }
+
+  .nav-btn {
+    background: var(--clay-surface);
+    border: none;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.88rem;
+    font-weight: 800;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 15px;
+    border-radius: 999px;
+    box-shadow: var(--shadow-clay-pill);
+    transition: transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .nav-btn:hover { transform: translateY(-2px); }
+  .nav-btn:active {
+    transform: translateY(1px) scale(0.97);
+    box-shadow: var(--shadow-clay-well);
+  }
+  .bitrate-btn {
+    background: var(--secondary);
+    color: #fff;
+    box-shadow: var(--shadow-clay-accent);
+  }
+  .bitrate-btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+
+  /* Hero & Sculpted Workbench */
+  .hero {
+    max-width: 780px;
+    margin: 38px auto 36px;
+    padding: 0 20px;
+    text-align: center;
+  }
+
+  /* Mode Switcher Well */
+  .pill-bar {
+    display: inline-flex;
+    align-items: center;
+    background: var(--clay-well);
+    border-radius: 999px;
+    padding: 7px;
+    margin-bottom: 26px;
+    gap: 6px;
+    box-shadow: var(--shadow-clay-well);
+  }
+
+  .pill-tab {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 0.82rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    padding: 10px 20px;
+    border-radius: 999px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .pill-tab:hover:not(.active) { color: var(--text); }
+  .pill-tab.active {
+    background: var(--accent-surface);
+    color: #ffffff;
+    box-shadow: var(--shadow-clay-accent);
+    transform: translateY(-1px);
+  }
+
+  .hero h1 {
+    font-size: clamp(2rem, 4.6vw, 2.85rem);
+    font-weight: 900;
+    margin: 0 0 10px;
+    letter-spacing: -0.025em;
+  }
+  .hero p.subtitle {
+    color: var(--text-muted);
+    font-size: 1.04rem;
+    font-weight: 600;
+    margin: 0 0 30px;
+  }
+
+  /* Main Molded Card */
+  .workbench-card {
+    background: var(--clay-surface);
+    border-radius: 32px;
+    padding: 28px;
+    box-shadow: var(--shadow-clay-card);
+    text-align: left;
+  }
+
+  /* Recessed Clay Dropzone Well */
+  .dropzone {
+    background: var(--clay-well);
+    border-radius: 24px;
+    padding: 36px 24px;
+    text-align: center;
+    box-shadow: var(--shadow-clay-well);
+    border: 2.5px dashed rgba(10, 164, 196, 0.35);
+    cursor: pointer;
+    transition: border-color 0.2s ease, transform 0.2s ease;
+  }
+  .dropzone:hover, .dropzone.dragover {
+    border-color: var(--accent);
+    transform: scale(1.006);
+  }
+  .drop-icon-mold {
+    width: 62px;
+    height: 62px;
+    margin: 0 auto 14px;
+    border-radius: 22px;
+    background: var(--clay-surface);
+    box-shadow: var(--shadow-clay-pill);
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .dropzone h3 {
+    margin: 0 0 6px;
+    font-size: 1.15rem;
+    font-weight: 900;
+  }
+  .dropzone p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    font-weight: 700;
+  }
+
+  /* Threshold Control Strip */
+  .controls-row {
+    margin-top: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    background: var(--clay-well);
+    padding: 14px 20px;
+    border-radius: 22px;
+    box-shadow: var(--shadow-clay-well);
+  }
+  .threshold-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 800;
+    font-size: 0.92rem;
+  }
+  .db-badge {
+    background: var(--clay-surface);
+    color: var(--accent);
+    padding: 5px 12px;
+    border-radius: 999px;
+    box-shadow: var(--shadow-clay-pill);
+    font-weight: 900;
+    min-width: 64px;
+    text-align: center;
+  }
+  input[type="range"] {
+    flex: 1;
+    min-width: 160px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  /* Queued File Chips */
+  .file-list {
+    margin-top: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 240px;
+    overflow-y: auto;
+    padding: 4px;
+  }
+  .file-item {
+    background: var(--clay-surface);
+    border-radius: 18px;
+    padding: 11px 16px;
+    box-shadow: var(--shadow-clay-pill);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 0.9rem;
+    font-weight: 700;
+  }
+  .file-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .file-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .file-size {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    flex-shrink: 0;
+  }
+  .remove-file-btn {
+    background: var(--clay-well);
+    border: none;
+    color: var(--text-muted);
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-weight: 900;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .remove-file-btn:hover { color: var(--err-ink); }
+
+  /* Primary Squishy Action Buttons */
+  .action-bar {
+    margin-top: 22px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  .btn-primary {
+    flex: 1;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 22px;
+    padding: 16px 26px;
+    font-family: inherit;
+    font-size: 1.04rem;
+    font-weight: 900;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    box-shadow: var(--shadow-clay-accent);
+    transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.15s ease;
+  }
+  .btn-primary:hover:not(:disabled) {
+    transform: translateY(-2px);
+    filter: brightness(1.04);
+  }
+  .btn-primary:active:not(:disabled) {
+    transform: translateY(2px) scale(0.98);
+  }
+  .btn-primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .btn-clear {
+    background: var(--clay-surface);
+    color: var(--text-muted);
+    border: none;
+    border-radius: 22px;
+    padding: 16px 20px;
+    font-family: inherit;
+    font-size: 0.94rem;
+    font-weight: 800;
+    cursor: pointer;
+    box-shadow: var(--shadow-clay-pill);
+  }
+  .btn-clear:hover { color: var(--text); }
+
+  /* Output Result Banner */
+  .result-box {
+    margin-top: 22px;
+    background: var(--clay-well);
+    border-radius: 24px;
+    padding: 20px 22px;
+    box-shadow: var(--shadow-clay-well);
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .result-box.visible { display: flex; }
+  .result-info h4 {
+    margin: 0 0 4px;
+    font-size: 1.05rem;
+    font-weight: 900;
+  }
+  .result-info p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.88rem;
+    font-weight: 700;
+  }
+
+  .btn-download {
+    background: var(--green-surface);
+    color: #fff;
+    text-decoration: none;
+    border-radius: 18px;
+    padding: 13px 22px;
+    font-weight: 900;
+    font-size: 0.95rem;
+    box-shadow: var(--shadow-clay-green);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .btn-download:hover { transform: translateY(-2px); }
+
+  .error-pill {
+    margin-top: 18px;
+    background: var(--err-bg);
+    color: var(--err-ink);
+    box-shadow: var(--shadow-clay-err);
+    padding: 13px 20px;
+    border-radius: 18px;
+    font-weight: 800;
+    font-size: 0.92rem;
+    display: none;
+    text-align: center;
+  }
+  .error-pill.visible { display: block; }
+
+  .site-footer {
+    text-align: center;
+    padding: 20px;
+    color: var(--text-muted);
+    font-size: 0.86rem;
+    font-weight: 700;
+  }
+
+  @media (max-width: 640px) {
+    .navbar { margin: 12px 14px 0; width: auto; padding: 12px 16px; border-radius: 22px; }
+    .badge-hq { display: none; }
+    .workbench-card { padding: 20px; border-radius: 26px; }
+    .action-bar { flex-direction: column; }
+    .btn-primary, .btn-clear { width: 100%; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <a class="logo" href="/"><img src="/static/favicon.ico" width="28" height="28"><span><b>sshhh</b>Vanisher</span></a>
-  <div class="bitrate-wrap">
-    <button type="button" class="badge" id="bitrate" value="320k" aria-label="Output bitrate" aria-haspopup="listbox" aria-expanded="false">
-      <span id="bitrateLabel">320kbps MP3</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m2 4 4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+
+<header class="navbar">
+  <a href="/" class="brand">
+    <span class="brand-icon-mold">
+      <img src="/static/favicon.ico" width="22" height="22" alt="">
+    </span>
+    <div><span>Silence</span> Cropper</div>
+  </a>
+  <div class="nav-right">
+    <button type="button" class="nav-btn bitrate-btn" id="bitrate-select" value="320" aria-label="MP3 bitrate: 320 kbps. Click to change">320 kbps</button>
+    <button type="button" class="nav-btn" id="lang-toggle">
+      <span id="lang-label">EN</span>
     </button>
-    <div class="bitrate-menu" id="bitrateMenu" role="listbox" aria-label="Output bitrate" hidden>
-      <button type="button" role="option" data-value="128k">128kbps MP3</button>
-      <button type="button" role="option" data-value="192k">192kbps MP3</button>
-      <button type="button" role="option" data-value="256k">256kbps MP3</button>
-      <button type="button" role="option" data-value="320k" aria-selected="true">320kbps MP3</button>
-    </div>
+    <button type="button" class="nav-btn" id="theme-toggle" aria-label="Toggle theme">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+    </button>
   </div>
-  <a class="nav" href="#faq">FAQ</a>
-  <div class="seg" role="group" aria-label="Language">
-    <button type="button" data-lang="en" aria-pressed="true">EN</button>
-    <button type="button" data-lang="id" aria-pressed="false">ID</button>
-  </div>
-  <button type="button" class="ico" id="themeBtn"></button>
 </header>
 
 <main>
-  <div class="tabs" role="tablist">
-    <button class="tab" role="tab" aria-selected="true" data-mode="file" data-i18n="tabFile"></button>
-    <button class="tab" role="tab" aria-selected="false" data-mode="batch" data-i18n="tabBatch"></button>
-  </div>
-
-  <h1>Silence Cropper</h1>
-  <p class="sub" data-i18n="sub"></p>
-
-  <div class="row">
-    <div class="drop" id="drop" tabindex="0" role="button">
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 20h16"/></svg>
-      <span id="dropText"></span>
+  <section class="hero">
+    <!-- Molded Mode Selector -->
+    <div class="pill-bar" role="tablist">
+      <button type="button" class="pill-tab active" data-mode="single">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        <span data-i18n="tab_single">SINGLE MP3</span>
+      </button>
+      <button type="button" class="pill-tab" data-mode="batch">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        <span data-i18n="tab_batch">BATCH / FOLDER</span>
+      </button>
     </div>
-    <label class="drop" id="urlbox" hidden>
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
-      <input id="url" type="url" data-i18n-ph="urlPh">
-    </label>
-    <button class="go" id="go"></button>
-  </div>
-  <input type="file" id="file" accept=".mp3,audio/mpeg" hidden>
 
-  <div class="opts">
-    <label><span data-i18n="cut"></span> <input type="range" id="thr" min="-60" max="-5" value="-40"><output id="thrOut">-40 dB</output></label>
-    <label><span data-i18n="pad"></span> <input type="range" id="pad" min="0" max="500" step="10" value="0"><output id="padOut">0 ms</output></label>
-  </div>
+    <h1 data-i18n="hero_title">Auto Silence Cropper</h1>
+    <p class="subtitle" data-i18n="hero_sub">Trim intro &amp; outro silence below -40dB while preserving 320kbps audio &amp; ID3 tags</p>
 
-  <div id="results" aria-live="polite"></div>
+    <div class="workbench-card">
+      <input type="file" id="file-input" accept=".mp3,audio/mpeg" hidden>
 
-  <section id="faq">
-    <h2>FAQ</h2>
-    <p><b data-i18n="q1"></b><br><span data-i18n="a1"></span></p>
-    <p><b data-i18n="q2"></b><br><span data-i18n="a2"></span></p>
-    <p><b data-i18n="q3"></b><br><span data-i18n="a3"></span></p>
-    <p><b data-i18n="q4"></b><br><span data-i18n="a4"></span></p>
+      <div class="dropzone" id="dropzone">
+        <div class="drop-icon-mold">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <h3 id="drop-title" data-i18n="drop_single_title">Drop an MP3 file here or click to browse</h3>
+        <p id="drop-sub" data-i18n="drop_single_sub">Supports 320kbps MP3 with embedded ID3 cover art</p>
+      </div>
+
+      <div class="controls-row">
+        <div class="threshold-info">
+          <span data-i18n="threshold_label">Silence Threshold:</span>
+          <span class="db-badge" id="db-display">-40 dB</span>
+        </div>
+        <input type="range" id="threshold-slider" min="-50" max="-5" step="1" value="-40">
+      </div>
+
+      <div class="file-list" id="file-list"></div>
+
+      <div class="action-bar">
+        <button type="button" class="btn-primary" id="crop-btn" disabled>
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/>
+          </svg>
+          <span id="crop-btn-text" data-i18n="btn_crop">Crop Silence</span>
+        </button>
+        <button type="button" class="btn-clear" id="clear-btn" style="display:none;" data-i18n="btn_clear">Clear</button>
+      </div>
+
+      <div class="error-pill" id="error-box"></div>
+
+      <div class="result-box" id="result-box">
+        <div class="result-info">
+          <h4 id="result-title">Ready!</h4>
+          <p id="result-sub">Cropped at 320kbps with ID3 tags preserved.</p>
+        </div>
+        <a href="#" class="btn-download" id="download-link" download>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          <span id="download-text" data-i18n="btn_download">Download File</span>
+        </a>
+      </div>
+    </div>
   </section>
 </main>
 
-<footer>All rights reserved &copy; 2026 ikhwnfzan.</footer>
+<footer class="site-footer">
+  Silence Cropper • FFmpeg -40dB Auto Intro/Outro Trimmer
+</footer>
 
 <script>
-const $ = s => document.querySelector(s);
-const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmt = ms => { const s = Math.round(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+const $ = (id) => document.getElementById(id);
+let mode = "single"; // "single" | "batch"
+let selectedFiles = [];
+let lang = "en";
 
-const T = {
+const I18N = {
   en: {
-    tabFile: 'FILE', tabBatch: 'BATCH', tabLink: 'LINK',
-    sub: 'Cut the quiet intro and outro off your MP3s. Nothing leaves your computer.',
-    dropOne: 'Choose or drop an MP3 file', dropMany: 'Choose or drop MP3 files',
-    nFiles: n => n + ' files selected', pickFirst: 'Pick an MP3 first',
-    urlPh: 'Paste a YouTube link', trim: 'Trim', trimming: 'Trimming…',
-    cut: 'Cut below', pad: 'Keep padding',
-    tagsKept: 'Tags kept', removed: s => s + 's removed', intro: 'Intro', outro: 'Outro',
-    play: 'Play preview', pause: 'Pause',
-    dl: '⬇ Download MP3', zip: 'Download all as ZIP',
-    errFile: 'Could not trim this file:', errReq: 'Request failed. Is the server running?',
-    toLight: 'Switch to light theme', toDark: 'Switch to dark theme',
-    q1: 'What does -40 dB mean?', a1: 'Any part at the start or end that is quieter than the cut level (default -40 dBFS) is removed. Move the slider lower, for example -50 dB, to cut less.',
-    q2: 'Is the middle of the song changed?', a2: 'No. Only the intro and outro are removed. The file is re-encoded as MP3, so pick a high bitrate.',
-    q3: 'Which links work in the LINK tab?', a3: 'Anything yt-dlp can download as audio, such as YouTube. Spotify links do not work because the audio is DRM protected. Only use content you have the right to download.',
-    q4: 'Are tags and cover art kept?', a4: 'Yes. Title, artist, album, cover art and other ID3 tags are copied from the original to the trimmed file.'
+    tab_single: "SINGLE MP3",
+    tab_batch: "BATCH / FOLDER",
+    hero_title: "Auto Silence Cropper",
+    hero_sub: "Trim intro & outro silence below -40dB while preserving 320kbps audio & ID3 tags",
+    drop_single_title: "Drop an MP3 file here or click to browse",
+    drop_single_sub: "Select a single .mp3 file to trim leading and trailing silence",
+    drop_batch_title: "Drop multiple MP3 files here or click to select",
+    drop_batch_sub: "Select multiple .mp3 tracks to crop in batch and download as ZIP",
+    threshold_label: "Silence Threshold:",
+    btn_crop: "Crop Silence",
+    btn_clear: "Clear",
+    btn_download: "Download File",
+    processing: "Cropping silence…",
+    ready_title: "Cropping Complete!",
+    ready_sub: "Trimmed at 320kbps with original ID3 tags preserved."
   },
   id: {
-    tabFile: 'FILE', tabBatch: 'MASSAL', tabLink: 'TAUTAN',
-    sub: 'Potong intro dan outro yang sunyi dari MP3 kamu. Tidak ada yang keluar dari komputermu.',
-    dropOne: 'Pilih atau seret file MP3', dropMany: 'Pilih atau seret file MP3',
-    nFiles: n => n + ' file dipilih', pickFirst: 'Pilih MP3 dulu',
-    urlPh: 'Tempel tautan YouTube', trim: 'Potong', trimming: 'Memotong…',
-    cut: 'Potong di bawah', pad: 'Sisakan jeda',
-    tagsKept: 'Tag dipertahankan', removed: s => s + ' dtk dipotong', intro: 'Intro', outro: 'Outro',
-    play: 'Putar pratinjau', pause: 'Jeda',
-    dl: '⬇ Unduh MP3', zip: 'Unduh semua (ZIP)',
-    errFile: 'Gagal memotong file ini:', errReq: 'Permintaan gagal. Apakah server berjalan?',
-    toLight: 'Ganti ke tema terang', toDark: 'Ganti ke tema gelap',
-    q1: 'Apa arti -40 dB?', a1: 'Bagian awal atau akhir yang lebih pelan dari batas potong (bawaan -40 dBFS) akan dihapus. Geser slider lebih rendah, misalnya -50 dB, agar lebih sedikit yang dipotong.',
-    q2: 'Apakah bagian tengah lagu berubah?', a2: 'Tidak. Hanya intro dan outro yang dihapus. File di-encode ulang sebagai MP3, jadi pilih bitrate yang tinggi.',
-    q3: 'Tautan apa yang bisa dipakai di tab TAUTAN?', a3: 'Apa pun yang bisa diunduh yt-dlp sebagai audio, seperti YouTube. Tautan Spotify tidak bisa karena audionya dilindungi DRM. Gunakan hanya konten yang boleh kamu unduh.',
-    q4: 'Apakah tag dan sampul tetap ada?', a4: 'Ya. Judul, artis, album, sampul, dan tag ID3 lainnya disalin dari file asli ke file hasil potong.'
+    tab_single: "SATU MP3",
+    tab_batch: "BATCH / BANYAK FILE",
+    hero_title: "Auto Silence Cropper",
+    hero_sub: "Potong hening intro & outro di bawah -40dB dengan kualitas 320kbps & tag ID3 utuh",
+    drop_single_title: "Tarik satu file MP3 ke sini atau klik untuk memilih",
+    drop_single_sub: "Pilih satu file .mp3 untuk memotong bagian hening awal & akhir",
+    drop_batch_title: "Tarik banyak file MP3 ke sini atau klik untuk memilih",
+    drop_batch_sub: "Pilih beberapa file .mp3 sekaligus untuk diproses dan diunduh sebagai ZIP",
+    threshold_label: "Ambang Hening:",
+    btn_crop: "Potong Hening",
+    btn_clear: "Hapus",
+    btn_download: "Unduh Hasil",
+    processing: "Memotong bagian hening…",
+    ready_title: "Selesai Dipotong!",
+    ready_sub: "Audio 320kbps & metadata ID3 tetap terjaga."
   }
 };
-const store = {
-  get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
-  set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} }
-};
-let lang = store.get('lang') || ((navigator.language || '').toLowerCase().startsWith('id') ? 'id' : 'en');
-const t = (k, ...a) => { const v = T[lang][k]; return typeof v === 'function' ? v(...a) : v; };
 
-let files = [], mode = 'file', busy = false, last = [], failed = false;
-const input = $('#file'), drop = $('#drop');
-
-function refreshDrop() {
-  $('#dropText').textContent = pickHint ? t('pickFirst') : !files.length ? t(mode === 'file' ? 'dropOne' : 'dropMany')
-    : files.length === 1 ? files[0].name : t('nFiles', files.length);
-}
-let pickHint = false;
-function setBtn() { $('#go').textContent = t(busy ? 'trimming' : 'trim'); }
-
-function draw(canvas, d) {
-  const css = getComputedStyle(document.documentElement);
-  const keep = css.getPropertyValue('--pri').trim(), cutc = css.getPropertyValue('--cut').trim();
-  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
-  canvas.width = w * dpr; canvas.height = h * dpr;
-  const c = canvas.getContext('2d'); c.scale(dpr, dpr);
-  const n = d.peaks.length, bw = w / n;
-  d.peaks.forEach((p, i) => {
-    const tm = (i + .5) / n * d.duration, kept = tm >= d.start && tm <= d.end;
-    const bh = Math.max(2, p * h);
-    c.fillStyle = kept ? keep : cutc;
-    c.fillRect(i * bw + 1, (h - bh) / 2, Math.max(1, bw - 2), bh);
+function applyLang() {
+  const dict = I18N[lang];
+  $("lang-label").textContent = lang.toUpperCase();
+  document.querySelectorAll("[data-i18n]").forEach((el) => {
+    const k = el.dataset.i18n;
+    if (dict[k]) el.textContent = dict[k];
   });
-  if (d.pos != null) {  // playhead
-    c.fillStyle = css.getPropertyValue('--acc').trim();
-    c.fillRect(Math.min(w - 2, d.pos / d.duration * w), 0, 2, h);
+  updateDropText();
+}
+
+function updateDropText() {
+  const dict = I18N[lang];
+  if (mode === "single") {
+    $("drop-title").textContent = dict.drop_single_title;
+    $("drop-sub").textContent = dict.drop_single_sub;
+    $("file-input").removeAttribute("multiple");
+  } else {
+    $("drop-title").textContent = dict.drop_batch_title;
+    $("drop-sub").textContent = dict.drop_batch_sub;
+    $("file-input").setAttribute("multiple", "multiple");
   }
 }
 
-// ---------- preview player: play the trimmed song, click the waveform to jump ----------
-const player = new Audio(); let cur = null;
-const setPlay = d => {
-  if (!d || !d.btn) return;
-  const on = cur === d && !player.paused;
-  d.btn.textContent = on ? '❚❚' : '▶\uFE0E';
-  d.btn.setAttribute('aria-label', t(on ? 'pause' : 'play'));
-};
-function tick() {
-  if (!cur) return;
-  cur.pos = cur.start + player.currentTime * 1000;
-  if (cur.cv) draw(cur.cv, cur);
-  if (!player.paused) requestAnimationFrame(tick);
-}
-function play(d, atMs) {
-  if (cur !== d) {
-    const o = cur; cur = d;
-    if (o) { o.pos = null; if (o.cv) draw(o.cv, o); setPlay(o); }
-    player.src = d.url || ('/play/' + d.id);
-  }
-  if (atMs != null) { player.currentTime = (atMs - d.start) / 1000; player.play(); }
-  else if (player.paused) player.play(); else player.pause();
-}
-player.onplay = () => { setPlay(cur); tick(); };
-player.onpause = () => setPlay(cur);
-player.onended = () => { if (!cur) return; cur.pos = null; if (cur.cv) draw(cur.cv, cur); setPlay(cur); };
-
-function render() {
-  const out = $('#results'); out.innerHTML = '';
-  if (failed) { out.innerHTML = `<div class="item"><p class="err">${esc(t('errReq'))}</p></div>`; return; }
-  const ok = [];
-  last.forEach(d => {
-    const el = document.createElement('div'); el.className = 'item';
-    if (d.error) {
-      el.innerHTML = `<h3>${esc(d.name)}</h3><p class="err">${esc(t('errFile'))} ${esc(d.error)}</p>`;
-    } else {
-      ok.push(d);
-      const removed = d.duration - (d.end - d.start);
-      el.innerHTML = `<div class="top"><button type="button" class="play"></button><div class="info"><h3>${esc(d.name)}</h3><div class="tags">
-        <span class="tag">${fmt(d.duration)} → ${fmt(d.end - d.start)}</span>
-        <span class="tag hl">${esc(t('removed', (removed / 1000).toFixed(1)))}</span>
-        <span class="tag">${esc(t('intro'))} ${(d.start / 1000).toFixed(1)}s</span>
-        <span class="tag">${esc(t('outro'))} ${((d.duration - d.end) / 1000).toFixed(1)}s</span>
-        <span class="tag">${d.threshold} dB</span>${d.tags ? `<span class="tag">${esc(t('tagsKept'))}</span>` : ''}</div></div>
-        <a class="dl" href="/download/${d.id}">${esc(t('dl'))}</a></div><canvas></canvas>`;
-    }
-    out.appendChild(el);
-    const cv = el.querySelector('canvas');
-    if (cv) {
-      d.cv = cv; d.btn = el.querySelector('.play'); draw(cv, d); setPlay(d);
-      d.btn.onclick = () => play(d);
-      cv.style.cursor = 'pointer';
-      cv.onclick = e => {
-        const r = cv.getBoundingClientRect(), ms = (e.clientX - r.left) / r.width * d.duration;
-        if (ms >= d.start && ms <= d.end) play(d, ms);
-      };
-    }
+document.querySelectorAll(".pill-tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".pill-tab").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    mode = btn.dataset.mode;
+    selectedFiles = [];
+    renderFileList();
+    updateDropText();
+    hideFeedback();
   });
-  if (ok.length > 1) {
-    const z = document.createElement('a'); z.className = 'zip';
-    z.href = '/download-all?ids=' + ok.map(d => d.id).join(',');
-    z.textContent = t('zip'); out.appendChild(z);
-  }
-}
-
-function applyTheme(th) {
-  document.documentElement.dataset.theme = th; store.set('theme', th);
-  const b = $('#themeBtn');
-  b.textContent = th === 'light' ? '☀' : '☾';
-  b.setAttribute('aria-label', t(th === 'dark' ? 'toLight' : 'toDark')); b.title = b.getAttribute('aria-label');
-  render();
-}
-function applyLang(l) {
-  lang = l; store.set('lang', l);
-  document.documentElement.lang = l;
-  document.querySelectorAll('[data-i18n]').forEach(e => e.textContent = t(e.dataset.i18n));
-  document.querySelectorAll('[data-i18n-ph]').forEach(e => e.placeholder = t(e.dataset.i18nPh));
-  document.querySelectorAll('[data-lang]').forEach(b => b.setAttribute('aria-pressed', b.dataset.lang === l));
-  refreshDrop(); setBtn(); applyTheme(document.documentElement.dataset.theme);
-}
-document.querySelectorAll('[data-lang]').forEach(b => b.onclick = () => applyLang(b.dataset.lang));
-$('#themeBtn').onclick = () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
-
-const bitrateBtn = $('#bitrate'), bitrateMenu = $('#bitrateMenu');
-function showBitrates(open) {
-  bitrateBtn.setAttribute('aria-expanded', open);
-  bitrateMenu.hidden = !open;
-}
-bitrateBtn.onclick = () => showBitrates(bitrateMenu.hidden);
-bitrateMenu.onclick = e => {
-  const option = e.target.closest('[data-value]');
-  if (!option) return;
-  bitrateBtn.value = option.dataset.value;
-  $('#bitrateLabel').textContent = option.textContent;
-  bitrateMenu.querySelectorAll('[role=option]').forEach(x => x.setAttribute('aria-selected', x === option));
-  showBitrates(false);
-};
-document.addEventListener('click', e => { if (!e.target.closest('.bitrate-wrap')) showBitrates(false); });
-bitrateBtn.onkeydown = e => { if (e.key === 'Escape') showBitrates(false); };
-
-document.querySelectorAll('.tab').forEach(tb => tb.onclick = () => {
-  mode = tb.dataset.mode;
-  document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x === tb));
-  input.multiple = mode === 'batch';
-  drop.hidden = mode === 'link';
-  $('#urlbox').hidden = mode !== 'link';
-  setFiles([]);
 });
-function setFiles(list) {
-  files = [...list].filter(f => /\.mp3$/i.test(f.name));
-  if (mode === 'file') files = files.slice(0, 1);
-  pickHint = false;
-  drop.classList.toggle('has', files.length > 0);
-  refreshDrop();
+
+$("lang-toggle").addEventListener("click", () => {
+  lang = lang === "en" ? "id" : "en";
+  applyLang();
+});
+
+const SUN_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>';
+const MOON_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>';
+$("theme-toggle").addEventListener("click", () => {
+  const html = document.documentElement;
+  const next = html.dataset.theme === "dark" ? "light" : "dark";
+  html.dataset.theme = next;
+  $("theme-toggle").innerHTML = next === "dark" ? MOON_ICON : SUN_ICON;
+});
+
+const BITRATES = [128, 192, 256, 320];
+$("bitrate-select").addEventListener("click", (e) => {
+  const currentIndex = BITRATES.indexOf(Number(e.currentTarget.value));
+  const bitrate = BITRATES[(currentIndex + 1) % BITRATES.length];
+  e.currentTarget.value = bitrate;
+  e.currentTarget.textContent = `${bitrate} kbps`;
+  e.currentTarget.setAttribute("aria-label", `MP3 bitrate: ${bitrate} kbps. Click to change`);
+});
+
+$("threshold-slider").addEventListener("input", (e) => {
+  $("db-display").textContent = `${e.target.value} dB`;
+});
+
+function formatBytes(bytes) {
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(2) + " MB";
 }
-drop.onclick = () => input.click();
-drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } };
-input.onchange = () => setFiles(input.files);
-['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
-['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
-drop.addEventListener('drop', e => setFiles(e.dataTransfer.files));
 
-$('#url').onkeydown = e => { if (e.key === 'Enter') $('#go').click(); };
-$('#thr').oninput = e => $('#thrOut').textContent = e.target.value + ' dB';
-$('#pad').oninput = e => $('#padOut').textContent = e.target.value + ' ms';
+function hideFeedback() {
+  $("error-box").classList.remove("visible");
+  $("result-box").classList.remove("visible");
+}
 
-$('#go').onclick = async () => {
-  const link = $('#url').value.trim();
-  if (mode === 'link' ? !link : !files.length) {
-    if (mode === 'link') $('#url').focus(); else { pickHint = true; refreshDrop(); }
+function addFiles(fileListObj) {
+  hideFeedback();
+  const mp3s = Array.from(fileListObj).filter((f) => f.name.toLowerCase().endsWith(".mp3"));
+  if (!mp3s.length) {
+    $("error-box").textContent = "Please select valid .mp3 files.";
+    $("error-box").classList.add("visible");
     return;
   }
-  player.pause(); cur = null; busy = true; failed = false; last = []; setBtn(); $('#go').disabled = true; render();
-  const fd = new FormData();
-  if (mode === 'link') fd.append('url', link); else files.forEach(f => fd.append('files', f));
-  fd.append('threshold', $('#thr').value);
-  fd.append('padding', $('#pad').value);
-  fd.append('bitrate', $('#bitrate').value);
-  try {
-    const res = await fetch('/api/trim', { method: 'POST', body: fd });
-    last = await res.json();
-  } catch (e) { failed = true; }
-  busy = false; $('#go').disabled = false; setBtn(); render();
-};
+  if (mode === "single") {
+    selectedFiles = [mp3s[0]];
+  } else {
+    selectedFiles = [...selectedFiles, ...mp3s];
+  }
+  renderFileList();
+}
 
-applyLang(lang);
+function renderFileList() {
+  const list = $("file-list");
+  list.replaceChildren();
+  selectedFiles.forEach((f, idx) => {
+    const item = document.createElement("div");
+    item.className = "file-item";
+
+    const meta = document.createElement("div");
+    meta.className = "file-item-meta";
+
+    const name = document.createElement("span");
+    name.className = "file-name";
+    name.textContent = f.name;
+
+    const size = document.createElement("span");
+    size.className = "file-size";
+    size.textContent = formatBytes(f.size);
+
+    meta.append(name, size);
+
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "remove-file-btn";
+    rm.textContent = "×";
+    rm.onclick = () => {
+      selectedFiles.splice(idx, 1);
+      renderFileList();
+      hideFeedback();
+    };
+
+    item.append(meta, rm);
+    list.append(item);
+  });
+
+  $("crop-btn").disabled = selectedFiles.length === 0;
+  $("clear-btn").style.display = selectedFiles.length > 0 ? "inline-flex" : "none";
+}
+
+$("dropzone").addEventListener("click", () => $("file-input").click());
+$("file-input").addEventListener("change", (e) => {
+  if (e.target.files.length) addFiles(e.target.files);
+  e.target.value = "";
+});
+
+$("dropzone").addEventListener("dragover", (e) => {
+  e.preventDefault();
+  $("dropzone").classList.add("dragover");
+});
+$("dropzone").addEventListener("dragleave", () => $("dropzone").classList.remove("dragover"));
+$("dropzone").addEventListener("drop", (e) => {
+  e.preventDefault();
+  $("dropzone").classList.remove("dragover");
+  if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+});
+
+$("clear-btn").addEventListener("click", () => {
+  selectedFiles = [];
+  renderFileList();
+  hideFeedback();
+});
+
+$("crop-btn").addEventListener("click", async () => {
+  if (!selectedFiles.length) return;
+  const dict = I18N[lang];
+  hideFeedback();
+
+  $("crop-btn").disabled = true;
+  $("crop-btn-text").textContent = dict.processing;
+
+  const formData = new FormData();
+  selectedFiles.forEach((f) => formData.append("files", f));
+  formData.append("threshold", $("threshold-slider").value);
+  formData.append("bitrate", $("bitrate-select").value);
+
+  try {
+    const startRes = await fetch("/api/crop", { method: "POST", body: formData });
+    const startData = await startRes.json();
+    if (!startRes.ok) throw new Error(startData.error || "Upload failed");
+
+    const jobId = startData.jobId;
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/status/${jobId}`);
+        const data = await res.json();
+
+        if (data.status === "pending") {
+          $("crop-btn-text").textContent = `${dict.processing} (${data.completed + 1}/${data.total})`;
+        } else if (data.status === "ready") {
+          clearInterval(timer);
+          $("crop-btn").disabled = false;
+          $("crop-btn-text").textContent = dict.btn_crop;
+
+          $("result-title").textContent = dict.ready_title;
+          $("result-sub").textContent = `${data.filename} • ${dict.ready_sub}`;
+          $("download-link").href = data.downloadLink;
+          $("download-link").download = data.filename;
+          $("result-box").classList.add("visible");
+        } else if (data.status === "failed") {
+          clearInterval(timer);
+          throw new Error(data.error || "Cropping failed");
+        }
+      } catch (err) {
+        clearInterval(timer);
+        $("crop-btn").disabled = false;
+        $("crop-btn-text").textContent = dict.btn_crop;
+        $("error-box").textContent = err.message;
+        $("error-box").classList.add("visible");
+      }
+    }, 1200);
+  } catch (err) {
+    $("crop-btn").disabled = false;
+    $("crop-btn-text").textContent = dict.btn_crop;
+    $("error-box").textContent = err.message;
+    $("error-box").classList.add("visible");
+  }
+});
+
+applyLang();
 </script>
 </body>
 </html>
 """
 
-def free_port(preferred=5000):
-    for port in (preferred, 0):  # 0 = let the OS pick a free port
-        with socket.socket() as sock:
-            try:
-                sock.bind(("127.0.0.1", port))
-                return sock.getsockname()[1]
-            except OSError:
-                continue
-
-
 if __name__ == "__main__":
-    port = free_port()
-    url = f"http://127.0.0.1:{port}"
-    print(f"Silence Cropper is running at {url}  (close this window to quit)")
-    threading.Timer(1.2, lambda: webbrowser.open(url)).start()
-    app.run(host="127.0.0.1", port=port, debug=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
