@@ -233,8 +233,7 @@ def download_all():
 def favicon():
     return send_from_directory(
         os.path.join(app.root_path, "static"),
-        "favicon.svg",
-        mimetype="image/svg+xml",
+        "favicon.ico",
     )
 
 @app.get("/")
@@ -892,7 +891,7 @@ try {
 <header class="navbar">
   <a href="/" class="logo">
     <span class="logo-mold">
-      <img src="/favicon.ico" width="24" height="24" >
+      <img src="/static/favicon.ico" width="24" height="24" >
     </span>
     <div><b>sshhh</b>Vanisher</div>
   </a>
